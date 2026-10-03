@@ -1,0 +1,9 @@
+# gradlew must stay LF: the shell wrapper is executed directly on Linux runners,
+# and Git checkout on a Windows dev machine would otherwise not be able to run it.
+gradlew text eol=lf
+
+# gradlew.bat is the opposite case: cmd.exe needs CRLF.
+gradlew.bat text eol=crlf
+
+# The Gradle wrapper JAR is binary and must not be touched by any eol filter.
+gradle/wrapper/gradle-wrapper.jar binary

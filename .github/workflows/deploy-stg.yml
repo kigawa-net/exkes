@@ -1,0 +1,217 @@
+name: Deploy (stg)
+
+# issue #2「デプロイフロー」/ stg 側:
+#   main push -> test -> container build -> Harbor push -> platform の
+#                ./exkes/stg/exkes-<module>.yaml の image を更新して commit/push
+#                -> Argo CD が platform-exkes-stg へ自動同期
+#
+# pull_request では test ジョブだけ実行する。PR 用の image / dev 環境は
+# 作らない（issue #2 の「デプロイ規則」: 環境は stg と main の 2 つだけ）。
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+concurrency:
+  group: exkes-deploy-stg-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  HARBOR_REGISTRY: harbor.kigawa.net
+  # issue #2「Container Registry」: harbor.kigawa.net/private/exkes:<tag>。
+  # ただしタグはモジュール別（main-<sha>）。stg / main で同じタグを使う。
+  IMAGE_NAMESPACE: private
+  HARBOR_USER: robot$kigawa-net
+  MANIFEST_REPOSITORY: kigawa-net/platform
+  MANIFEST_DIR: exkes/stg
+  # build ジョブの matrix と必ず同じ内容にする。issue #2 の対象モジュールは
+  # exkes-api と exkes-controller の 2 つだけ
+  #（exkes-terminal-gateway / runtime-agent は issue #2「対象外」）。
+  MODULES: exkes-api exkes-controller
+
+jobs:
+  test:
+    name: test
+    # PR でも必ず走る。build / deploy は push 限定なので、job 側の if は不要。
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # ビルドは Java 21 toolchain を使うので明示的に用意する。
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - run: ./gradlew test --no-daemon
+
+  build:
+    name: build (${{ matrix.module }})
+    needs: test
+    # main push のみ。PR では image を push しない。
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        module:
+          - exkes-api
+          - exkes-controller
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # stg / prod で同一タグを使うため、prod 側は再ビルドせずこのタグを転記する。
+      - name: Determine image tag
+        id: tag
+        env:
+          SHA: ${{ github.sha }}
+        run: echo "tag=main-${SHA}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.HARBOR_REGISTRY }}
+          username: ${{ env.HARBOR_USER }}
+          password: ${{ secrets.HARBOR_PASS }}
+
+      - uses: docker/build-push-action@v5
+        with:
+          context: ./
+          file: Dockerfile
+          build-args: MODULE=${{ matrix.module }}
+          push: true
+          tags: ${{ env.HARBOR_REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.module }}:${{ steps.tag.outputs.tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy-stg:
+    name: deploy to stg
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      # WIF: kigawa-net-app-token が OIDC で admin-panel を呼び出し短命トークンを
+      # 発行するため必須（静的 PAT は使わない）。
+      id-token: write
+    steps:
+      - name: Mint platform repo token
+        id: token
+        uses: kigawa-net/kinfra/.github/actions/kigawa-net-app-token@dev
+        with:
+          owner: kigawa-net
+          repositories: platform
+          permissions: '{"contents":"write"}'
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.MANIFEST_REPOSITORY }}
+          ref: main
+          token: ${{ steps.token.outputs.token }}
+
+      # stg マニフェストの image を更新する。
+      #
+      # 1. platform 側は 1 リソース 1 ファイルのフラット構成にする（issue #2
+      #    「platform 側構成」: Deployment と Service を別ファイルに）。
+      #    なので更新対象は Deployment ファイル 1 つだけ。それでも
+      #    select(.kind == "Deployment") ガードは残す: 将来 Service を同じ
+      #    ファイルへ統合した場合に、素的 .spec.template 代入が Service にも
+      #    適用され Argo CD が unknown field "spec.template" で弾く事故を
+      #    防ぐため。
+      # 2. image を yq 式内で "$image" と書くと yq の変数として解釈される。
+      #    環境変数は strenv(image) で読む（mikefarah/yq >= 4.25）。
+      - name: Update image tags
+        id: update
+        env:
+          TAG: ${{ needs.build.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          # 更新できたファイルだけ_expect に入れて、混ざり防止の判定に使う。
+          # bash の配列で持つ（"..." の中に \n を書いても改行にはならないため）。
+          _expect=()
+          for module in $MODULES; do
+            # ファイル名は module 名そのもの（exkes-api / exkes-controller）。
+            manifest="./${MANIFEST_DIR}/${module}.yaml"
+            # export 必須: yq の strenv() はプロセス「環境」を読むため、単なる
+            # shell 変数だと空文字で image が上書きされる。
+            export image="${HARBOR_REGISTRY}/${IMAGE_NAMESPACE}/${module}:${TAG}"
+
+            # exkes/{stg,main}/ のマニフェストは kigawa-net/platform 側の別 issue
+            # で追加される。platform main に入っていないのに exkes main を
+            # マージした場合、対象ファイルが無いので ::error:: を出してスキップ
+            # する（Argo CD 側の manifest 追加を先に）。
+            if [ ! -f "$manifest" ]; then
+              echo "::error::${manifest} が ${MANIFEST_REPOSITORY}@main にありません。platform 側の exkes/{stg,main}/ マニフェストを先に main に入れてください。このモジュールの stg 更新はスキップします。"
+              continue
+            fi
+
+            # 1 リソース 1 ファイルであることを確認する。複数ドキュメントの
+            # ファイル（例: lipl の Deployment + Service）が混ざると
+            # yq -r '.kind' が複数行になり、ここで必ず失敗する。
+            kind=$(yq -r '.kind' "$manifest")
+            if [ "$kind" != "Deployment" ]; then
+              echo "::error::${manifest} は Deployment 1 リソースのファイルである必要があります（実際の kind: $(echo "$kind" | tr '\n' ' ')）"
+              exit 1
+            fi
+
+            yq -i '(select(.kind == "Deployment") | .spec.template.spec.containers[0].image) = strenv(image)' "$manifest"
+
+            # 書き込み結果の読み戻し検証。空 image や別の値が書かれていた場合は
+            # ここで止める。
+            updated=$(yq -r '.spec.template.spec.containers[0].image' "$manifest")
+            if [ "$updated" != "$image" ]; then
+              echo "::error::${manifest} の image 更新に失敗しました（期待: ${image} / 実際: ${updated}）"
+              exit 1
+            fi
+
+            git add "$manifest"
+            # git add / git diff は先頭の ./ を落とす。記録側も揃えておくと
+            # 混ざり防止の判定を完全一致で行える。
+            _expect+=("${manifest#./}")
+            echo "::notice::${manifest} -> ${updated}"
+          done
+
+          # 何も更新できなかった場合（対象ファイルが無いだけ）は commit しない。
+          # 後段の push ジョブを if で止めないと「nothing to commit」で落ちる。
+          if git diff --cached --quiet; then
+            echo "更新対象なし: ${MANIFEST_DIR} に更新できる manifest がありません"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # 意図しないファイル（exkes-api-svc.yaml / rbac.yaml など）が混ざって
+          # いないか確認する。glob ではなく、更新したパスだけを想定する。
+          actual=$(git diff --cached --name-only)
+          for path in $actual; do
+            found=false
+            for want in "${_expect[@]}"; do
+              if [ "$path" = "$want" ]; then
+                found=true
+                break
+              fi
+            done
+            if [ "$found" != "true" ]; then
+              echo "::error::意図しないファイル ${path} がステージされています"
+              exit 1
+            fi
+          done
+
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          git diff --cached
+
+      - name: push
+        # changed=false（platform 側の manifest が未マージ等）のときは commit しない。
+        if: steps.update.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          git config user.name githubActions
+          git config user.email bot@kigawa.net
+          git commit --author=. -m "deploy exkes ${{ needs.build.outputs.tag }} to stg"
+          git push

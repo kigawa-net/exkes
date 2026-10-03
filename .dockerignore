@@ -1,0 +1,13 @@
+.git
+.github
+.gradle
+.kotlin
+**/build
+.idea
+*.iml
+docs
+README.md
+CLAUDE.md
+LICENSE
+.claude
+local.properties
