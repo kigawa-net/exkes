@@ -1,0 +1,173 @@
+name: Deploy (prod, stg の image をそのまま昇格)
+
+# issue #2「デプロイフロー」/ prod 側:
+#   main 上で workflow_dispatch -> kigawa-net/platform の ./exkes/stg から
+#   現在の image を読み、./exkes/main へ同一 image を転記して commit/push
+#   -> Argo CD が platform-exkes-main へ自動同期
+#
+# 重要: prod では image の build / push を行わない。再ビルドしないことで
+# stg と prod が同一バイナリであることを保証する（issue #2 の目的）。
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: exkes-deploy-prod
+  cancel-in-progress: false
+
+env:
+  HARBOR_REGISTRY: harbor.kigawa.net
+  IMAGE_NAMESPACE: private
+  MANIFEST_REPOSITORY: kigawa-net/platform
+  SOURCE_DIR: exkes/stg
+  TARGET_DIR: exkes/main
+  # issue #2 の対象モジュールは exkes-api と exkes-controller の 2 つだけ。
+  # deploy-stg.yml の MODULES / build の matrix と揃える。
+  MODULES: exkes-api exkes-controller
+
+jobs:
+  guard:
+    name: main ブランチ限定
+    runs-on: ubuntu-latest
+    steps:
+      # issue #2「prod workflow を main branch 限定にする」。
+      # workflow_dispatch は任意のブランチから実行できるので、ここで明示的に
+      # 落とす（job の if にすると無言で skip されて察觉しづらい）。
+      - name: Reject non-main ref
+        if: github.ref != 'refs/heads/main'
+        run: |
+          echo "::error::prod デプロイは refs/heads/main からのみ実行できます（現在: ${{ github.ref }}）"
+          exit 1
+
+  promote:
+    name: promote stg -> prod
+    needs: guard
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      # WIF: kigawa-net-app-token が OIDC で admin-panel を呼び出し短命トークンを
+      # 発行するため必須（静的 PAT は使わない）。
+      id-token: write
+    steps:
+      - name: Mint platform repo token
+        id: token
+        uses: kigawa-net/kinfra/.github/actions/kigawa-net-app-token@dev
+        with:
+          owner: kigawa-net
+          repositories: platform
+          permissions: '{"contents":"write"}'
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.MANIFEST_REPOSITORY }}
+          ref: main
+          token: ${{ steps.token.outputs.token }}
+
+      # stg の image をそのまま prod へ転記する。再ビルドはしない。
+      - name: Promote image tags
+        id: promote
+        run: |
+          set -euo pipefail
+
+          # 更新できたファイルだけ_expect に入れて、混ざり防止の判定に使う。
+          # bash の配列で持つ（"..." の中に \n を書いても改行にはならないため）。
+          _expect=()
+          for module in $MODULES; do
+            # ファイル名は module 名そのもの（exkes-api / exkes-controller）。
+            source="./${SOURCE_DIR}/${module}.yaml"
+            target="./${TARGET_DIR}/${module}.yaml"
+
+            # stg に該当ファイルが無い / kind が Deployment でない場合は、
+            # 空 image を main へ書き込まないよう明確に失敗させる。
+            if [ ! -f "$source" ]; then
+              echo "::error::${source} が ${MANIFEST_REPOSITORY}@main にありません。先に stg へデプロイしていないか、platform 側の manifest を確認してください"
+              exit 1
+            fi
+            kind=$(yq -r '.kind' "$source")
+            if [ "$kind" != "Deployment" ]; then
+              echo "::error::${source} は Deployment 1 リソースのファイルである必要があります（実際の kind: $(echo "$kind" | tr '\n' ' ')）"
+              exit 1
+            fi
+
+            # 昇格元は stg で使用中の image。空文字なら失敗（黙って空 image を
+            # main に書かない）。
+            image=$(yq -r 'select(.kind == "Deployment") | .spec.template.spec.containers[0].image' "$source")
+            # export 必須: 下記の yq 式が strenv(image) で環境変数を参照するため。
+            export image
+            if [ -z "$image" ] || [ "$image" = "null" ]; then
+              echo "::error::${source} から image を取得できませんでした。昇格を中止します"
+              exit 1
+            fi
+
+            # 昇格するのは main-<sha> タグだけ。:latest や別 project の image が
+            # が入っていた場合、prod が stg と別バイナリで動く事故になるので、
+            # その場で落とす。
+            if ! printf '%s' "$image" | grep -Eq "^${HARBOR_REGISTRY}/${IMAGE_NAMESPACE}/${module}:main-[0-9a-f]{40}$"; then
+              echo "::error::昇格元の image が想定外です: ${image}（${HARBOR_REGISTRY}/${IMAGE_NAMESPACE}/${module}:main-<40 hex> を期待）"
+              exit 1
+            fi
+
+            if [ ! -f "$target" ]; then
+              echo "::error::${target} が ${MANIFEST_REPOSITORY}@main にありません。platform 側の exkes/main/ マニフェストを追加してください"
+              exit 1
+            fi
+            kind=$(yq -r '.kind' "$target")
+            if [ "$kind" != "Deployment" ]; then
+              echo "::error::${target} は Deployment 1 リソースのファイルである必要があります（実際の kind: $(echo "$kind" | tr '\n' ' ')）"
+              exit 1
+            fi
+
+            # 書込も kind でガードする。Service などに .spec.template を注入
+            # しないため。
+            yq -i '(select(.kind == "Deployment") | .spec.template.spec.containers[0].image) = strenv(image)' "$target"
+
+            updated=$(yq -r '.spec.template.spec.containers[0].image' "$target")
+            if [ "$updated" != "$image" ]; then
+              echo "::error::${target} の image 転記に失敗しました（期待: ${image} / 実際: ${updated}）"
+              exit 1
+            fi
+
+            git add "$target"
+            # git add / git diff は先頭の ./ を落とす。記録側も揃えておくと
+            # 混ざり防止の判定を完全一致で行える。
+            _expect+=("${target#./}")
+            echo "::notice::${target} -> ${updated}"
+          done
+
+          # prod が既に stg と同じ image の場合は commit しない。後段の push を
+          # if で止めないと「nothing to commit」で落ちる（再実行しても緑のまま）。
+          if git diff --cached --quiet; then
+            echo "prod は既に stg と同じ image を参照している。変更なし"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # 意図しないファイル（exkes-api-svc.yaml など）が混ざっていないか確認する。
+          actual=$(git diff --cached --name-only)
+          for path in $actual; do
+            found=false
+            for want in "${_expect[@]}"; do
+              if [ "$path" = "$want" ]; then
+                found=true
+                break
+              fi
+            done
+            if [ "$found" != "true" ]; then
+              echo "::error::意図しないファイル ${path} がステージされています"
+              exit 1
+            fi
+          done
+
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          git diff --cached
+
+      - name: push
+        # 昇格対象が無かったときは commit しない（冪等）。
+        if: steps.promote.outputs.changed == 'true'
+        env:
+          ACTOR: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+          git config user.name githubActions
+          git config user.email bot@kigawa.net
+          git commit --author=. -m "deploy exkes prod (promote from stg) by ${ACTOR}"
+          git push
