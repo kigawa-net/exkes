@@ -25,6 +25,8 @@ dependencies {
     // KubernetesClientFactory / KubernetesWorkspaceProvisioner. Kept here and
     // never re-exported: exkes-api must not have client-java on its classpath.
     implementation(libs.kubernetes.client)
+    // JSON parsing for RuntimeSpec/Template merging
+    implementation(libs.kotlinx.serialization.json)
 
     implementation(libs.logback.classic)
     implementation(libs.logstash.logback.encoder)

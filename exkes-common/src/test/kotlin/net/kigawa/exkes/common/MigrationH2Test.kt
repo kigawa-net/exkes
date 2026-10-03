@@ -33,7 +33,7 @@ class MigrationH2Test {
 
     @Test
     fun `flyway applies v1 workspaces migration on h2`() = withMigratedDatabase { _, result ->
-        assertEquals(1, result.migrationsExecuted)
+        assertEquals(3, result.migrationsExecuted)
     }
 
     @Test

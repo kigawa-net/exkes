@@ -5,11 +5,17 @@ import io.ktor.server.application.*
 import io.ktor.server.plugins.contentnegotiation.*
 import io.ktor.server.routing.*
 import kotlinx.serialization.json.Json
+import net.kigawa.exkes.api.routes.configureExecutionRoutes
 import net.kigawa.exkes.api.routes.configureHealthRoutes
+import net.kigawa.exkes.api.routes.configureRuntimeRoutes
 import net.kigawa.exkes.api.routes.configureWorkspaceRoutes
 import net.kigawa.exkes.api.routes.installErrorPages
+import net.kigawa.exkes.api.runtime.RuntimeService
 import net.kigawa.exkes.api.workspace.WorkspaceService
 import net.kigawa.exkes.common.config.ExkesConfig
+import net.kigawa.exkes.common.db.ExecutionRepository
+import net.kigawa.exkes.common.db.RuntimeRepository
+import net.kigawa.exkes.common.db.RuntimeTemplateRepository
 import net.kigawa.exkes.common.db.WorkspaceRepository
 import net.kigawa.exkes.common.db.closeDataSource
 import net.kigawa.exkes.common.db.connectDatabase
@@ -51,7 +57,16 @@ fun Application.module() {
     // Manual DI: repository -> service (plan chapter 3.2). No provisioner and no
     // reconciler: they live in exkes-controller.
     val workspaceRepository = WorkspaceRepository()
+    val runtimeRepository = RuntimeRepository()
+    val templateRepository = RuntimeTemplateRepository()
+    val executionRepository = ExecutionRepository()
     val workspaceService = WorkspaceService(workspaceRepository, config.workspace)
+    val runtimeService = RuntimeService(
+        runtimeRepository = runtimeRepository,
+        executionRepository = executionRepository,
+        templateRepository = templateRepository,
+        workspaceRepository = workspaceRepository,
+    )
 
     install(ContentNegotiation) {
         json(Json { ignoreUnknownKeys = true })
@@ -63,6 +78,8 @@ fun Application.module() {
     routing {
         configureHealthRoutes()
         configureWorkspaceRoutes(workspaceService)
+        configureRuntimeRoutes(runtimeService)
+        configureExecutionRoutes(runtimeService)
     }
 
     monitor.subscribe(ApplicationStopping) {

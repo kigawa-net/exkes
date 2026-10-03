@@ -60,6 +60,9 @@ data class Workspace(
 ) {
     fun canTransitionTo(to: WorkspaceStatus): Boolean = WorkspaceStatus.canTransition(status, to)
 
+    /** True if a Runtime can be attached (PVC is bound and workspace is usable). */
+    fun canAttachRuntime(): Boolean = status == WorkspaceStatus.READY || status == WorkspaceStatus.ARCHIVED
+
     companion object {
         const val DEFAULT_STORAGE_SIZE_BYTES: Long = 1024L * 1024 * 1024
         const val PVC_NAME_PREFIX: String = "ws-"
