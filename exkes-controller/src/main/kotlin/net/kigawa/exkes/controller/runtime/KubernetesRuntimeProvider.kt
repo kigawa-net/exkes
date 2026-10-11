@@ -75,11 +75,14 @@ class KubernetesRuntimeProvider(
     }
 
     override fun startRuntime(runtime: Runtime) {
+        // Restart path: stop deleted the Pod but kept the Workspace PVC, so a missing
+        // Pod is recreated here (re-attaching the PVC). An existing Pod is left alone.
         val podName = resolvePodName(runtime)
-        val pod = readPod(podName) ?: throw KubernetesRuntimeException("Pod $podName not found for runtime ${runtime.id}")
-        // In Kubernetes, a Pod is either Running or not. If it exists, it's "started".
-        // This method is a no-op for Kubernetes; the reconciler will observe the Pod phase.
-        logger.debug("startRuntime called for {} (Pod {} exists)", runtime.id, podName)
+        if (readPod(podName) != null) {
+            logger.debug("startRuntime called for {} (Pod {} exists)", runtime.id, podName)
+            return
+        }
+        createRuntime(runtime)
     }
 
     override fun stopRuntime(runtime: Runtime): Boolean {
@@ -243,21 +246,28 @@ class KubernetesRuntimeProvider(
         return merged.map { entry -> V1EnvVar().name(entry.key).value(entry.value) }
     }
 
-    private fun mapPodPhaseToRuntimeStatus(pod: V1Pod): RuntimeStatus {
-        val phase = pod.status?.phase?.uppercase() ?: return RuntimeStatus.FAILED
-        return when (phase) {
-            "PENDING" -> RuntimeStatus.STARTING
-            "RUNNING" -> RuntimeStatus.RUNNING
-            "SUCCEEDED" -> RuntimeStatus.STOPPED
-            "FAILED" -> RuntimeStatus.FAILED
-            "UNKNOWN" -> RuntimeStatus.FAILED
-            else -> RuntimeStatus.FAILED
-        }
-    }
+    private fun mapPodPhaseToRuntimeStatus(pod: V1Pod): RuntimeStatus = mapPodToRuntimeStatus(pod)
 
     private fun readPod(name: String): V1Pod? = try {
         api.readNamespacedPod(name, namespace).execute()
     } catch (e: ApiException) {
         if (e.code == 404) null else throw e
+    }
+}
+
+/**
+ * Maps an observed Pod to a RuntimeStatus. A Running Pod is only RUNNING once its
+ * Ready condition is True; until then it is still STARTING.
+ */
+internal fun mapPodToRuntimeStatus(pod: V1Pod): RuntimeStatus {
+    val phase = pod.status?.phase?.uppercase() ?: return RuntimeStatus.FAILED
+    return when (phase) {
+        "PENDING" -> RuntimeStatus.STARTING
+        "RUNNING" -> {
+            val ready = pod.status?.conditions?.any { it.type == "Ready" && it.status == "True" } == true
+            if (ready) RuntimeStatus.RUNNING else RuntimeStatus.STARTING
+        }
+        "SUCCEEDED" -> RuntimeStatus.STOPPED
+        else -> RuntimeStatus.FAILED
     }
 }

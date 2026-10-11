@@ -52,12 +52,14 @@ class RuntimeReconciler(
         val running = runtimeRepository.findByStatus(RuntimeStatus.RUNNING)
         val stopping = runtimeRepository.findByStatus(RuntimeStatus.STOPPING)
         val expired = runtimeRepository.findByStatus(RuntimeStatus.EXPIRED)
+        val stopped = runtimeRepository.findByStatus(RuntimeStatus.STOPPED)
         val deleting = runtimeRepository.findByStatus(RuntimeStatus.DELETING)
 
         processCreating(creating)
         processStarting(starting)
         processRunning(running)
         processStopping(stopping)
+        processStopped(stopped)
         processExpired(expired)
         processDeleting(deleting)
 
@@ -129,7 +131,21 @@ class RuntimeReconciler(
 
     private fun processStarting(runtimes: List<Runtime>) {
         for (runtime in runtimes) {
+            // Restart (STOPPED -> STARTING) re-attaches the retained Workspace, so the
+            // same attachability check as CREATING applies.
+            val workspace = workspaceRepository.findById(runtime.workspaceId)
+            if (workspace == null || !workspace.status.canAttachRuntime()) {
+                val message = "workspace ${runtime.workspaceId} not attachable (${workspace?.status})"
+                if (runtimeRepository.transition(runtime.id, RuntimeStatus.STARTING, RuntimeStatus.FAILED, message)) {
+                    attempts.remove(runtime.id)
+                    logger.error("runtime {} moved to FAILED: {}", runtime.id, message)
+                }
+                continue
+            }
+
             try {
+                // Recreates the Pod if it is gone (restart after stop); no-op otherwise.
+                provisioner.startRuntime(runtime)
                 val status = provisioner.getRuntimeStatus(runtime)
                 when (status) {
                     RuntimeStatus.RUNNING -> {
@@ -177,8 +193,11 @@ class RuntimeReconciler(
 
             try {
                 val status = provisioner.getRuntimeStatus(runtime)
-                if (status == RuntimeStatus.FAILED) {
-                    val message = "Pod failed while running"
+                if (status == RuntimeStatus.FAILED || status == RuntimeStatus.STOPPED) {
+                    // FAILED covers Pod loss (404) and abnormal exit; STOPPED means the Pod
+                    // completed (Succeeded), which a long-lived Runtime must not do.
+                    val message = if (status == RuntimeStatus.FAILED) "Pod failed or disappeared while running"
+                    else "Pod terminated while running"
                     if (runtimeRepository.transition(runtime.id, RuntimeStatus.RUNNING, RuntimeStatus.FAILED, message)) {
                         attempts.remove(runtime.id)
                         logger.error("runtime {} moved to FAILED: {}", runtime.id, message)
@@ -202,6 +221,16 @@ class RuntimeReconciler(
                 }
             } catch (e: Exception) {
                 logger.error("failed to stop runtime {}, will retry", runtime.id, e)
+            }
+        }
+    }
+
+    /** TTL cleanup for idle runtimes: a STOPPED runtime past its TTL is deleted (Workspace is kept). */
+    private fun processStopped(runtimes: List<Runtime>) {
+        for (runtime in runtimes) {
+            if (!isExpired(runtime)) continue
+            if (runtimeRepository.transition(runtime.id, RuntimeStatus.STOPPED, RuntimeStatus.DELETING)) {
+                logger.info("runtime {} moved to DELETING (TTL expired while STOPPED)", runtime.id)
             }
         }
     }
