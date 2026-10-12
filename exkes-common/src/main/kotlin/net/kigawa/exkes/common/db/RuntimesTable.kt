@@ -21,6 +21,7 @@ object RuntimesTable : Table("runtimes") {
     val labelsJson = text("labels_json").nullable()
     val createdAt = timestamp("created_at")
     val updatedAt = timestamp("updated_at")
+    val lastReadyObservedAt = timestamp("last_ready_observed_at").nullable()
 
     override val primaryKey = PrimaryKey(id)
 }

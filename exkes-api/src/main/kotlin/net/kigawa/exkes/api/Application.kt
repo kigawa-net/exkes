@@ -61,11 +61,18 @@ fun Application.module() {
     val templateRepository = RuntimeTemplateRepository()
     val executionRepository = ExecutionRepository()
     val workspaceService = WorkspaceService(workspaceRepository, config.workspace)
+    // Admission freshness: how old a Ready observation from exkes-controller may be before
+    // the runtime stops admitting Executions. Read here, not in ExkesConfig, so that
+    // exkes-controller (which shares ExkesConfig) does not need the key.
+    val admissionFreshnessSeconds = environment.config
+        .propertyOrNull("exkes.admission.freshnessSeconds")?.getString()?.toLong()
+        ?: RuntimeService.DEFAULT_ADMISSION_FRESHNESS_SECONDS
     val runtimeService = RuntimeService(
         runtimeRepository = runtimeRepository,
         executionRepository = executionRepository,
         templateRepository = templateRepository,
         workspaceRepository = workspaceRepository,
+        admissionFreshnessSeconds = admissionFreshnessSeconds,
     )
 
     install(ContentNegotiation) {

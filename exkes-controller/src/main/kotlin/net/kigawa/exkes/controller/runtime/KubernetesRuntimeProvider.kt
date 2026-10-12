@@ -66,8 +66,13 @@ class KubernetesRuntimeProvider(
             podName
         } catch (e: ApiException) {
             if (e.code == 409) {
-                // Lost a creation race; the next read observes the winner.
-                readPod(podName)?.metadata?.name ?: throw e
+                // Lost a creation race (another actor created the same name). Adopt the Pod
+                // only when it belongs to this runtime; a foreign Pod is never attached.
+                val existing = readPod(podName) ?: throw e
+                if (!isPodOwnedBy(existing, runtime.id)) {
+                    throw KubernetesRuntimeException("Pod $podName exists but is not owned by runtime ${runtime.id}", e)
+                }
+                podName
             } else {
                 throw KubernetesRuntimeException("failed to create Pod $podName: ${e.message}", e)
             }
@@ -75,11 +80,18 @@ class KubernetesRuntimeProvider(
     }
 
     override fun startRuntime(runtime: Runtime) {
+        // Restart path: stop deleted the Pod but kept the Workspace PVC, so a missing
+        // Pod is recreated here (re-attaching the PVC). An existing Pod is left alone.
         val podName = resolvePodName(runtime)
-        val pod = readPod(podName) ?: throw KubernetesRuntimeException("Pod $podName not found for runtime ${runtime.id}")
-        // In Kubernetes, a Pod is either Running or not. If it exists, it's "started".
-        // This method is a no-op for Kubernetes; the reconciler will observe the Pod phase.
-        logger.debug("startRuntime called for {} (Pod {} exists)", runtime.id, podName)
+        val existing = readPod(podName)
+        if (existing != null) {
+            if (!isPodOwnedBy(existing, runtime.id)) {
+                throw KubernetesRuntimeException("Pod $podName exists but is not owned by runtime ${runtime.id}")
+            }
+            logger.debug("startRuntime called for {} (Pod {} exists)", runtime.id, podName)
+            return
+        }
+        createRuntime(runtime)
     }
 
     override fun stopRuntime(runtime: Runtime): Boolean {
@@ -108,6 +120,7 @@ class KubernetesRuntimeProvider(
         val pod = readPod(podName)
         return when {
             pod == null -> RuntimeStatus.FAILED // Pod vanished unexpectedly
+            !isPodOwnedBy(pod, runtime.id) -> RuntimeStatus.FAILED // a name clash is not this runtime's Pod
             else -> mapPodPhaseToRuntimeStatus(pod)
         }
     }
@@ -243,21 +256,38 @@ class KubernetesRuntimeProvider(
         return merged.map { entry -> V1EnvVar().name(entry.key).value(entry.value) }
     }
 
-    private fun mapPodPhaseToRuntimeStatus(pod: V1Pod): RuntimeStatus {
-        val phase = pod.status?.phase?.uppercase() ?: return RuntimeStatus.FAILED
-        return when (phase) {
-            "PENDING" -> RuntimeStatus.STARTING
-            "RUNNING" -> RuntimeStatus.RUNNING
-            "SUCCEEDED" -> RuntimeStatus.STOPPED
-            "FAILED" -> RuntimeStatus.FAILED
-            "UNKNOWN" -> RuntimeStatus.FAILED
-            else -> RuntimeStatus.FAILED
-        }
-    }
+    private fun mapPodPhaseToRuntimeStatus(pod: V1Pod): RuntimeStatus = mapPodToRuntimeStatus(pod)
 
     private fun readPod(name: String): V1Pod? = try {
         api.readNamespacedPod(name, namespace).execute()
     } catch (e: ApiException) {
         if (e.code == 404) null else throw e
+    }
+}
+
+/**
+ * True when [pod] carries the labels exkes sets on every Pod it creates for [runtimeId].
+ * Used before adopting an existing Pod (409 on create, restart) so exkes never attaches
+ * to a Pod it did not create for this runtime.
+ */
+internal fun isPodOwnedBy(pod: V1Pod, runtimeId: String): Boolean {
+    val labels = pod.metadata?.labels ?: return false
+    return labels["app.kubernetes.io/managed-by"] == "exkes" && labels["exkes.runtime-id"] == runtimeId
+}
+
+/**
+ * Maps an observed Pod to a RuntimeStatus. A Running Pod is only RUNNING once its
+ * Ready condition is True; until then it is still STARTING.
+ */
+internal fun mapPodToRuntimeStatus(pod: V1Pod): RuntimeStatus {
+    val phase = pod.status?.phase?.uppercase() ?: return RuntimeStatus.FAILED
+    return when (phase) {
+        "PENDING" -> RuntimeStatus.STARTING
+        "RUNNING" -> {
+            val ready = pod.status?.conditions?.any { it.type == "Ready" && it.status == "True" } == true
+            if (ready) RuntimeStatus.RUNNING else RuntimeStatus.STARTING
+        }
+        "SUCCEEDED" -> RuntimeStatus.STOPPED
+        else -> RuntimeStatus.FAILED
     }
 }

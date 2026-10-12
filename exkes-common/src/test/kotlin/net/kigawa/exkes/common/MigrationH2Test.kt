@@ -33,7 +33,18 @@ class MigrationH2Test {
 
     @Test
     fun `flyway applies v1 workspaces migration on h2`() = withMigratedDatabase { _, result ->
-        assertEquals(3, result.migrationsExecuted)
+        assertEquals(4, result.migrationsExecuted)
+    }
+
+    @Test
+    fun `runtimes table has the nullable last_ready_observed_at column from V4`() = withMigratedDatabase { dataSource, _ ->
+        dataSource.connection.use { conn ->
+            conn.createStatement().use { stmt ->
+                stmt.executeQuery("SELECT last_ready_observed_at FROM runtimes").use { rs ->
+                    assertTrue(rs.next().not(), "fresh runtimes table must be empty")
+                }
+            }
+        }
     }
 
     @Test

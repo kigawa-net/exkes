@@ -36,17 +36,21 @@ data class KubernetesConfig(
  *   attempt counter alone would keep the row in CREATING for good. Measured from
  *   `workspaces.created_at`, so a controller restart does not reset the budget.
  *   `0` disables the timeout.
+ * @property notReadyGraceSeconds how long a RUNNING runtime's Pod may stay NotReady
+ *   (Ready=False) before the runtime moves to DEGRADED. Shorter blips keep it RUNNING.
  */
 data class ReconcilerConfig(
     val intervalSeconds: Long,
     val maxAttempts: Int,
     val creatingTimeoutSeconds: Long,
+    val notReadyGraceSeconds: Long,
 ) {
     companion object {
         fun fromConfig(config: ApplicationConfig): ReconcilerConfig = ReconcilerConfig(
             intervalSeconds = config.property("exkes.reconciler.intervalSeconds").getString().toLong(),
             maxAttempts = config.property("exkes.reconciler.maxAttempts").getString().toInt(),
             creatingTimeoutSeconds = config.property("exkes.reconciler.creatingTimeoutSeconds").getString().toLong(),
+            notReadyGraceSeconds = config.property("exkes.reconciler.notReadyGraceSeconds").getString().toLong(),
         )
     }
 }

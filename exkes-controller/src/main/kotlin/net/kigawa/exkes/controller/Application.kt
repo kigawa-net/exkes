@@ -84,6 +84,7 @@ fun Application.module() {
         provisioner = runtimeProvisioner,
         intervalSeconds = controllerConfig.reconciler.intervalSeconds,
         maxAttempts = controllerConfig.reconciler.maxAttempts,
+        notReadyGraceSeconds = controllerConfig.reconciler.notReadyGraceSeconds,
     )
 
     routing {
