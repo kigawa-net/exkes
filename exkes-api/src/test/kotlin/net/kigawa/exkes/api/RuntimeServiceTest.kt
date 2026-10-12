@@ -1,5 +1,6 @@
 package net.kigawa.exkes.api
 
+import java.time.Instant
 import javax.sql.DataSource
 import kotlin.test.BeforeTest
 import kotlin.test.Test
@@ -7,6 +8,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlinx.coroutines.runBlocking
 import net.kigawa.exkes.api.runtime.InvalidRuntimeRequestException
+import net.kigawa.exkes.api.runtime.RuntimeNotAdmittingException
 import net.kigawa.exkes.api.runtime.RuntimeService
 import net.kigawa.exkes.common.config.DatabaseConfig
 import net.kigawa.exkes.common.db.ExecutionRepository
@@ -21,7 +23,12 @@ import net.kigawa.exkes.common.domain.Runtime
 import net.kigawa.exkes.common.domain.RuntimeStatus
 import net.kigawa.exkes.common.domain.WorkspaceStatus
 
-/** Execution admission: only RUNNING runtimes accept new Executions (DEGRADED = NotReady is refused). */
+/**
+ * Execution admission: a new Execution needs RUNNING plus a fresh Ready observation from
+ * exkes-controller (`last_ready_observed_at`). The controller side of these writes is
+ * covered by RuntimeReconcilerTest; here the controller is simulated through
+ * RuntimeRepository, since exkes-api cannot depend on exkes-controller.
+ */
 class RuntimeServiceTest {
     private lateinit var dataSource: DataSource
     private lateinit var runtimes: RuntimeRepository
@@ -29,6 +36,8 @@ class RuntimeServiceTest {
     private lateinit var service: RuntimeService
     private lateinit var workspaceId: String
     private val templateId = "tpl-service-test"
+    private val freshness = 15L
+    private var now: Instant = Instant.now()
 
     @BeforeTest
     fun setup() {
@@ -57,7 +66,11 @@ class RuntimeServiceTest {
         val ws = workspaces.create("ws-${System.nanoTime()}", "sc", 1024L, emptyMap())
         workspaces.transition(ws.id, WorkspaceStatus.CREATING, WorkspaceStatus.READY)
         workspaceId = ws.id
-        service = RuntimeService(runtimes, ExecutionRepository(), templates, workspaces)
+        service = RuntimeService(
+            runtimes, ExecutionRepository(), templates, workspaces,
+            admissionFreshnessSeconds = freshness,
+            clock = { now },
+        )
     }
 
     private fun runtimeIn(status: RuntimeStatus): Runtime {
@@ -77,15 +90,73 @@ class RuntimeServiceTest {
         service.createExecution(runtimeId, ExecutionType.COMMAND, """{"command":"true"}""", null)
     }
 
+    /** Simulates the controller observing Ready=True at [now]. */
+    private fun observeReady(id: String) = assertEquals(true, runtimes.recordReadyObserved(id, now))
+
+    /** Simulates the controller observing Ready=False: admission closes at once. */
+    private fun observeNotReady(id: String) = assertEquals(true, runtimes.clearReadyObservation(id))
+
     @Test
-    fun `execution is accepted while runtime is running`() {
+    fun `execution is accepted while runtime is running with a fresh ready observation`() {
         val rt = runtimeIn(RuntimeStatus.RUNNING)
+        observeReady(rt.id)
         assertEquals(rt.id, submit(rt.id).runtimeId)
+    }
+
+    @Test
+    fun `running runtime without any ready observation is refused`() {
+        val rt = runtimeIn(RuntimeStatus.RUNNING)
+        assertFailsWith<RuntimeNotAdmittingException> { submit(rt.id) }
+    }
+
+    @Test
+    fun `execution is refused right after the pod turns not ready`() {
+        val rt = runtimeIn(RuntimeStatus.RUNNING)
+        observeReady(rt.id)
+        now = now.plusSeconds(1)
+        observeNotReady(rt.id)
+        // Still RUNNING in the DB, and the Ready observation from 1s ago is still fresh.
+        assertEquals(RuntimeStatus.RUNNING, runtimes.findById(rt.id)!!.status)
+        assertFailsWith<RuntimeNotAdmittingException> { submit(rt.id) }
+    }
+
+    @Test
+    fun `execution is refused when the controller stops observing and the ready observation goes stale`() {
+        val rt = runtimeIn(RuntimeStatus.RUNNING)
+        observeReady(rt.id)
+        now = now.plusSeconds(freshness + 1)
+        assertFailsWith<RuntimeNotAdmittingException> { submit(rt.id) }
+    }
+
+    @Test
+    fun `execution is accepted again after the pod is ready again`() {
+        val rt = runtimeIn(RuntimeStatus.RUNNING)
+        observeReady(rt.id)
+        now = now.plusSeconds(1)
+        observeNotReady(rt.id)
+        assertFailsWith<RuntimeNotAdmittingException> { submit(rt.id) }
+        now = now.plusSeconds(1)
+        observeReady(rt.id)
+        assertEquals(rt.id, submit(rt.id).runtimeId)
+    }
+
+    @Test
+    fun `execution is refused when the ttl has passed even with a fresh ready observation`() {
+        val ttlRuntime = runtimes.create(workspaceId, templateId, null, null, 10L, null)
+        assertEquals(true, runtimes.transition(ttlRuntime.id, RuntimeStatus.CREATING, RuntimeStatus.STARTING))
+        assertEquals(true, runtimes.transition(ttlRuntime.id, RuntimeStatus.STARTING, RuntimeStatus.RUNNING))
+        val created = runtimes.findById(ttlRuntime.id)!!.createdAt
+        // Fresh Ready observation taken at the moment the TTL runs out (controller has not
+        // yet moved the row to EXPIRED).
+        now = created.plusSeconds(10)
+        observeReady(ttlRuntime.id)
+        assertFailsWith<RuntimeNotAdmittingException> { submit(ttlRuntime.id) }
     }
 
     @Test
     fun `execution is refused while runtime is degraded`() {
         val rt = runtimeIn(RuntimeStatus.DEGRADED)
+        observeReady(rt.id)
         assertFailsWith<InvalidRuntimeRequestException> { submit(rt.id) }
     }
 

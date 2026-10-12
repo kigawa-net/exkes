@@ -9,6 +9,7 @@ import io.ktor.server.plugins.statuspages.StatusPages
 import io.ktor.server.response.respond
 import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.SerializationException
+import net.kigawa.exkes.api.runtime.RuntimeNotAdmittingException
 import net.kigawa.exkes.api.workspace.InvalidWorkspaceRequestException
 import net.kigawa.exkes.api.workspace.WorkspaceConflictException
 import net.kigawa.exkes.api.workspace.WorkspaceNotFoundException
@@ -41,6 +42,12 @@ fun Application.installErrorPages() {
 
         exception<WorkspaceConflictException> { call, cause ->
             call.respondError(HttpStatusCode.Conflict, "CONFLICT", cause.message ?: "conflict")
+        }
+
+        // Retryable: the runtime is RUNNING but has no fresh Ready observation yet.
+        // Not 409, which the workspace conflict convention reserves for duplicates.
+        exception<RuntimeNotAdmittingException> { call, cause ->
+            call.respondError(HttpStatusCode.ServiceUnavailable, "UNAVAILABLE", cause.message ?: "unavailable")
         }
 
         exception<InvalidWorkspaceRequestException> { call, cause ->

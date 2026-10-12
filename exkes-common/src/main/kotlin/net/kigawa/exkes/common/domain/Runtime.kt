@@ -71,6 +71,8 @@ data class Runtime(
     val labelsJson: String?,
     val createdAt: Instant,
     val updatedAt: Instant,
+    /** Last Pod Ready=True observation by the controller; null when admission is closed. */
+    val lastReadyObservedAt: Instant? = null,
 ) {
     fun canTransitionTo(to: RuntimeStatus): Boolean = RuntimeStatus.canTransition(status, to)
 

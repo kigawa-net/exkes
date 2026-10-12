@@ -1,5 +1,7 @@
 package net.kigawa.exkes.api.runtime
 
+import java.time.Duration
+import java.time.Instant
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import net.kigawa.exkes.common.db.ExecutionListResult
@@ -25,6 +27,13 @@ class RuntimeConflictException(id: String) :
     RuntimeException("runtime is being modified concurrently: $id")
 
 /**
+ * The runtime is RUNNING in the DB but is not admitting Executions: no fresh Ready
+ * observation from exkes-controller, or the TTL has passed. Retryable (503).
+ */
+class RuntimeNotAdmittingException(id: String, reason: String) :
+    RuntimeException("runtime $id is not admitting executions: $reason")
+
+/**
  * Application service for /v1/workspaces/{workspaceId}/runtimes and /v1/runtimes/{runtimeId}/executions.
  *
  * Owns validation and is the boundary between the Ktor event loop and the
@@ -43,7 +52,17 @@ class RuntimeService(
     private val executionRepository: ExecutionRepository,
     private val templateRepository: RuntimeTemplateRepository,
     private val workspaceRepository: WorkspaceRepository,
+    /**
+     * A RUNNING runtime admits Executions only if exkes-controller observed its Pod Ready
+     * within this many seconds. Must be a few reconcile intervals (controller default 5s).
+     */
+    private val admissionFreshnessSeconds: Long = DEFAULT_ADMISSION_FRESHNESS_SECONDS,
+    private val clock: () -> Instant = Instant::now,
 ) {
+    init {
+        require(admissionFreshnessSeconds > 0) { "admissionFreshnessSeconds must be positive: $admissionFreshnessSeconds" }
+    }
+
     suspend fun createRuntime(
         workspaceId: String,
         templateId: String,
@@ -170,6 +189,23 @@ class RuntimeService(
         if (runtime.status != RuntimeStatus.RUNNING) {
             throw InvalidRuntimeRequestException("runtime ${runtimeId} is not RUNNING (status=${runtime.status})")
         }
+        // The DB status alone is not enough: the controller may be down, or the Pod may have
+        // turned NotReady since the last observation. Require a fresh Ready observation.
+        val now = clock()
+        val readyAt = runtime.lastReadyObservedAt
+            ?: throw RuntimeNotAdmittingException(runtimeId, "no Ready observation")
+        if (Duration.between(readyAt, now).seconds > admissionFreshnessSeconds) {
+            throw RuntimeNotAdmittingException(runtimeId, "last Ready observation is stale")
+        }
+        if (readyAt.isAfter(now.plusSeconds(admissionFreshnessSeconds))) {
+            throw RuntimeNotAdmittingException(runtimeId, "Ready observation is in the future")
+        }
+        // Same TTL rule as the controller: a runtime past its TTL must not start new work
+        // while the controller has not yet moved it to EXPIRED.
+        val ttl = runtime.ttlSeconds
+        if (ttl != null && ttl > 0 && Duration.between(runtime.createdAt, now).seconds >= ttl) {
+            throw RuntimeNotAdmittingException(runtimeId, "TTL has expired")
+        }
 
         // Validate type-specific payload
         when (type) {
@@ -229,6 +265,7 @@ class RuntimeService(
     companion object {
         const val MAX_LIMIT = 500
         const val MAX_TRANSITION_ATTEMPTS = 3
+        const val DEFAULT_ADMISSION_FRESHNESS_SECONDS = 15L
 
         /** Blocking JDBC must not run on a Netty event loop thread. */
         private suspend fun <T> onIoThread(block: () -> T): T = withContext(Dispatchers.IO) { block() }

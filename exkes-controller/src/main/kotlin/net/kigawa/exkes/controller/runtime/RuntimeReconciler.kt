@@ -167,6 +167,7 @@ class RuntimeReconciler(
                     RuntimeStatus.RUNNING -> {
                         if (runtimeRepository.transition(runtime.id, RuntimeStatus.STARTING, RuntimeStatus.RUNNING)) {
                             attempts.remove(runtime.id)
+                            recordReady(runtime)
                             logger.info("runtime {} is RUNNING", runtime.id)
                         }
                     }
@@ -210,7 +211,10 @@ class RuntimeReconciler(
             try {
                 val observed = provisioner.getRuntimeStatus(runtime)
                 when (observed) {
-                    RuntimeStatus.RUNNING -> notReadySince.remove(runtime.id)
+                    RuntimeStatus.RUNNING -> {
+                        notReadySince.remove(runtime.id)
+                        recordReady(runtime)
+                    }
                     // Pod exists but Ready=False (mapPodToRuntimeStatus maps it to STARTING).
                     RuntimeStatus.STARTING -> observeNotReady(runtime)
                     RuntimeStatus.FAILED, RuntimeStatus.STOPPED ->
@@ -246,12 +250,15 @@ class RuntimeReconciler(
                     RuntimeStatus.RUNNING -> {
                         if (runtimeRepository.transition(runtime.id, RuntimeStatus.DEGRADED, RuntimeStatus.RUNNING)) {
                             notReadySince.remove(runtime.id)
+                            recordReady(runtime)
                             logger.info("runtime {} recovered to RUNNING (Pod Ready again)", runtime.id)
                         }
                     }
                     RuntimeStatus.FAILED, RuntimeStatus.STOPPED ->
                         failObservedPod(runtime, RuntimeStatus.DEGRADED, observed)
-                    else -> Unit // still NotReady: stay DEGRADED
+                    // still NotReady: stay DEGRADED; admission stays closed
+                    RuntimeStatus.STARTING -> clearReady(runtime)
+                    else -> Unit
                 }
             } catch (e: Exception) {
                 logger.warn("failed to check status for runtime {}: {}", runtime.id, e.message)
@@ -265,6 +272,8 @@ class RuntimeReconciler(
      * leave the runtime RUNNING.
      */
     private fun observeNotReady(runtime: Runtime) {
+        // Admission closes on the first NotReady observation, regardless of the grace period.
+        clearReady(runtime)
         val now = clock()
         val since = notReadySince.getOrPut(runtime.id) { now }
         val notReadyFor = Duration.between(since, now).seconds
@@ -274,6 +283,21 @@ class RuntimeReconciler(
         if (runtimeRepository.transition(runtime.id, RuntimeStatus.RUNNING, RuntimeStatus.DEGRADED)) {
             logger.warn("runtime {} moved to DEGRADED: {}", runtime.id, message)
         }
+    }
+
+    /**
+     * Records a Pod Ready=True observation. exkes-api admits new Executions only while the
+     * runtime is RUNNING and this observation is fresh (see RuntimeService.createExecution).
+     */
+    private fun recordReady(runtime: Runtime) {
+        if (!runtimeRepository.recordReadyObserved(runtime.id, clock())) {
+            logger.debug("skipped ready observation for runtime {} (no longer RUNNING/DEGRADED)", runtime.id)
+        }
+    }
+
+    /** Closes admission: clears the Ready observation so no stale RUNNING row is admitted. */
+    private fun clearReady(runtime: Runtime) {
+        runtimeRepository.clearReadyObservation(runtime.id)
     }
 
     /**

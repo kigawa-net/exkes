@@ -296,6 +296,61 @@ class RuntimeReconcilerTest {
     }
 
     @Test
+    fun `ready observation opens admission when running and not ready closes it at once`() {
+        val rt = newRuntime()
+        runToRunning(rt)
+        assertNotNull(runtimes.findById(rt.id)!!.lastReadyObservedAt)
+
+        provisioner.podStatus = RuntimeStatus.STARTING
+        now = now.plusSeconds(1)
+        reconciler.reconcileOnce() // first NotReady observation, well inside the grace period
+        assertEquals(RuntimeStatus.RUNNING, status(rt.id))
+        assertNull(runtimes.findById(rt.id)!!.lastReadyObservedAt)
+    }
+
+    @Test
+    fun `admission stays closed after controller restart while the pod is still not ready`() {
+        val rt = newRuntime()
+        runToRunning(rt)
+        provisioner.podStatus = RuntimeStatus.STARTING
+        reconciler.reconcileOnce()
+        assertNull(runtimes.findById(rt.id)!!.lastReadyObservedAt)
+
+        // Restart: the in-memory NotReady timer is gone, the DB keeps admission closed.
+        val restarted = RuntimeReconciler(runtimes, workspaces, provisioner, maxAttempts = 2, clock = { now })
+        now = now.plusSeconds(10)
+        restarted.reconcileOnce()
+        assertNull(runtimes.findById(rt.id)!!.lastReadyObservedAt)
+        assertEquals(RuntimeStatus.RUNNING, status(rt.id))
+    }
+
+    @Test
+    fun `admission stays closed in degraded and reopens only when the pod is ready again`() {
+        val rt = newRuntime()
+        runToRunning(rt)
+        provisioner.podStatus = RuntimeStatus.STARTING
+        reconciler.reconcileOnce()
+        now = now.plusSeconds(31)
+        reconciler.reconcileOnce()
+        assertEquals(RuntimeStatus.DEGRADED, status(rt.id))
+        assertNull(runtimes.findById(rt.id)!!.lastReadyObservedAt)
+
+        provisioner.podStatus = RuntimeStatus.RUNNING
+        reconciler.reconcileOnce()
+        assertEquals(RuntimeStatus.RUNNING, status(rt.id))
+        assertNotNull(runtimes.findById(rt.id)!!.lastReadyObservedAt)
+    }
+
+    @Test
+    fun `starting to running records the ready observation in the same cycle`() {
+        val rt = newRuntime()
+        reconciler.reconcileOnce()
+        reconciler.reconcileOnce()
+        assertEquals(RuntimeStatus.RUNNING, status(rt.id))
+        assertNotNull(runtimes.findById(rt.id)!!.lastReadyObservedAt)
+    }
+
+    @Test
     fun `a ready blip restarts the grace period`() {
         val rt = newRuntime()
         runToRunning(rt)

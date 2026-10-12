@@ -140,6 +140,31 @@ open class RuntimeRepository {
         updated > 0
     }
 
+    /**
+     * Records a Pod Ready=True observation at [at]. Only RUNNING/DEGRADED rows are
+     * written, so a runtime that moved on in the meantime is left alone.
+     */
+    fun recordReadyObserved(id: String, at: Instant): Boolean = transaction {
+        RuntimesTable.update({
+            (RuntimesTable.id eq id) and (RuntimesTable.status inList ADMISSION_SENSITIVE_STATUSES)
+        }) { stmt ->
+            stmt[RuntimesTable.lastReadyObservedAt] = at
+        } > 0
+    }
+
+    /**
+     * Closes admission for a runtime whose Pod was observed NotReady: clears the Ready
+     * observation. Called on the first NotReady observation, before (and independent of)
+     * the DEGRADED grace period.
+     */
+    fun clearReadyObservation(id: String): Boolean = transaction {
+        RuntimesTable.update({
+            (RuntimesTable.id eq id) and (RuntimesTable.status inList ADMISSION_SENSITIVE_STATUSES)
+        }) { stmt ->
+            stmt[RuntimesTable.lastReadyObservedAt] = null
+        } > 0
+    }
+
     private fun findByIdOrThrow(id: String): Runtime =
         findById(id) ?: throw IllegalStateException("runtime vanished after insert: $id")
 
@@ -156,9 +181,12 @@ open class RuntimeRepository {
         labelsJson = this[RuntimesTable.labelsJson],
         createdAt = this[RuntimesTable.createdAt],
         updatedAt = this[RuntimesTable.updatedAt],
+        lastReadyObservedAt = this[RuntimesTable.lastReadyObservedAt],
     )
 
     companion object {
         fun nowUtc(): Instant = Instant.now()
+
+        private val ADMISSION_SENSITIVE_STATUSES = listOf(RuntimeStatus.RUNNING.name, RuntimeStatus.DEGRADED.name)
     }
 }
