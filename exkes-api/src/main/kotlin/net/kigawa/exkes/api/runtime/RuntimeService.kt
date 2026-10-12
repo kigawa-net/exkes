@@ -17,6 +17,7 @@ import net.kigawa.exkes.common.db.RuntimeListResult
 import net.kigawa.exkes.common.db.RuntimeRepository
 import net.kigawa.exkes.common.db.RuntimeTemplateRepository
 import net.kigawa.exkes.common.db.WorkspaceRepository
+import net.kigawa.exkes.common.db.WorkspacePlacementAdmissionException
 import net.kigawa.exkes.common.domain.Execution
 import net.kigawa.exkes.common.domain.ExecutionStatus
 import net.kigawa.exkes.common.domain.ExecutionType
@@ -114,14 +115,18 @@ class RuntimeService(
                 throw InvalidRuntimeRequestException("ttlSeconds must be positive: $ttlSeconds")
             }
 
-            runtimeRepository.create(
+            try {
+                runtimeRepository.createBoundToWorkspace(
                 workspaceId = workspaceId,
                 templateId = templateId,
                 resourcesJson = resourcesJson,
                 envJson = envJson,
                 ttlSeconds = ttlSeconds,
                 labelsJson = labels?.let { kotlinx.serialization.json.Json { ignoreUnknownKeys = true }.encodeToString(it) },
-            )
+                )
+            } catch (e: WorkspacePlacementAdmissionException) {
+                throw RuntimeConflictException("workspace placement changed: $workspaceId")
+            }
         }
         if (idempotencyKey == null) {
             IdempotentResult(createFresh(), replayed = false)
