@@ -336,6 +336,41 @@ class RuntimeReconcilerTest {
     }
 
     @Test
+    fun `Workspace deleting clears fresh Ready observation of a running Pod`() {
+        val rt = newRuntime()
+        runToRunning(rt)
+        assertNotNull(runtimes.findById(rt.id)!!.lastReadyObservedAt)
+        assertTrue(workspaces.transition(workspaceId, WorkspaceStatus.READY, WorkspaceStatus.DELETING))
+
+        reconciler.reconcileOnce()
+        assertEquals(RuntimeStatus.RUNNING, status(rt.id))
+        assertNull(runtimes.findById(rt.id)!!.lastReadyObservedAt)
+
+        // Even if the Pod reports Ready again, an unusable Workspace cannot
+        // reopen admission.
+        provisioner.podStatus = RuntimeStatus.RUNNING
+        reconciler.reconcileOnce()
+        assertNull(runtimes.findById(rt.id)!!.lastReadyObservedAt)
+    }
+
+    @Test
+    fun `degraded Runtime cannot recover with stale Workspace placement`() {
+        val rt = newRuntime()
+        runToRunning(rt)
+        provisioner.podStatus = RuntimeStatus.STARTING
+        reconciler.reconcileOnce()
+        now = now.plusSeconds(31)
+        reconciler.reconcileOnce()
+        assertEquals(RuntimeStatus.DEGRADED, status(rt.id))
+
+        assertTrue(workspaces.transition(workspaceId, WorkspaceStatus.READY, WorkspaceStatus.DELETING))
+        provisioner.podStatus = RuntimeStatus.RUNNING
+        reconciler.reconcileOnce()
+        assertEquals(RuntimeStatus.DEGRADED, status(rt.id))
+        assertNull(runtimes.findById(rt.id)!!.lastReadyObservedAt)
+    }
+
+    @Test
     fun `admission stays closed after controller restart while the pod is still not ready`() {
         val rt = newRuntime()
         runToRunning(rt)
