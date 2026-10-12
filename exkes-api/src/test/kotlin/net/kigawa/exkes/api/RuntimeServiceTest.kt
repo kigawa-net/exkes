@@ -129,6 +129,15 @@ class RuntimeServiceTest {
     }
 
     @Test
+    fun `staleness boundary does not depend on sub-second rounding`() {
+        val rt = runtimeIn(RuntimeStatus.RUNNING)
+        observeReady(rt.id)
+        // Just past the limit, including a 1ms margin: 15.001s must be refused, 14.9s must still be admitted.
+        now = now.plusSeconds(freshness).plusMillis(1)
+        assertFailsWith<RuntimeNotAdmittingException> { submit(rt.id) }
+    }
+
+    @Test
     fun `execution is accepted again after the pod is ready again`() {
         val rt = runtimeIn(RuntimeStatus.RUNNING)
         observeReady(rt.id)

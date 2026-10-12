@@ -191,10 +191,12 @@ class RuntimeService(
         }
         // The DB status alone is not enough: the controller may be down, or the Pod may have
         // turned NotReady since the last observation. Require a fresh Ready observation.
+        // Compare full Duration values: Duration.seconds truncates, so 15.9999s would read as 15s and a stale
+        // observation could still be admitted at the boundary.
         val now = clock()
         val readyAt = runtime.lastReadyObservedAt
             ?: throw RuntimeNotAdmittingException(runtimeId, "no Ready observation")
-        if (Duration.between(readyAt, now).seconds > admissionFreshnessSeconds) {
+        if (Duration.between(readyAt, now) > Duration.ofSeconds(admissionFreshnessSeconds)) {
             throw RuntimeNotAdmittingException(runtimeId, "last Ready observation is stale")
         }
         if (readyAt.isAfter(now.plusSeconds(admissionFreshnessSeconds))) {
@@ -203,7 +205,7 @@ class RuntimeService(
         // Same TTL rule as the controller: a runtime past its TTL must not start new work
         // while the controller has not yet moved it to EXPIRED.
         val ttl = runtime.ttlSeconds
-        if (ttl != null && ttl > 0 && Duration.between(runtime.createdAt, now).seconds >= ttl) {
+        if (ttl != null && ttl > 0 && Duration.between(runtime.createdAt, now) >= Duration.ofSeconds(ttl.toLong())) {
             throw RuntimeNotAdmittingException(runtimeId, "TTL has expired")
         }
 
