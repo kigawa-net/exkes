@@ -17,6 +17,7 @@ import io.kubernetes.client.openapi.models.V1VolumeMount
 import kotlinx.serialization.json.Json
 import net.kigawa.exkes.common.config.WorkspaceConfig
 import net.kigawa.exkes.common.db.RuntimeTemplateRepository
+import net.kigawa.exkes.common.db.WorkspaceRepository
 import net.kigawa.exkes.common.domain.Runtime
 import net.kigawa.exkes.common.domain.RuntimeSpec
 import net.kigawa.exkes.common.domain.RuntimeStatus
@@ -26,6 +27,7 @@ import net.kigawa.exkes.common.domain.KubernetesRuntimeException
 import net.kigawa.exkes.common.domain.Workspace
 import net.kigawa.exkes.controller.config.KubernetesConfig
 import net.kigawa.exkes.controller.k8s.KubernetesClientFactory
+import net.kigawa.exkes.controller.workspace.resolvePvcName
 import org.slf4j.LoggerFactory
 
 /**
@@ -46,6 +48,7 @@ class KubernetesRuntimeProvider(
     private val kubernetesConfig: KubernetesConfig,
     private val templateRepository: RuntimeTemplateRepository,
     private val workspaceConfig: WorkspaceConfig,
+    private val workspaceRepository: WorkspaceRepository,
 ) : RuntimeProvisioner {
     private val logger = LoggerFactory.getLogger(KubernetesRuntimeProvider::class.java)
     private val json = Json { ignoreUnknownKeys = true }
@@ -54,11 +57,12 @@ class KubernetesRuntimeProvider(
     private val namespace: String = kubernetesConfig.resourceNamespace
 
     override fun createRuntime(runtime: Runtime): String {
+        val workspace = verifiedWorkspace(runtime)
         val template = templateRepository.findById(runtime.templateId)
             ?: throw RuntimeTemplateNotFoundException(runtime.templateId)
 
         val podName = resolvePodName(runtime)
-        val pod = buildPod(runtime, template, podName)
+        val pod = buildPod(runtime, template, podName, workspace)
 
         return try {
             api.createNamespacedPod(namespace, pod).execute()
@@ -80,6 +84,7 @@ class KubernetesRuntimeProvider(
     }
 
     override fun startRuntime(runtime: Runtime) {
+        verifiedWorkspace(runtime)
         // Restart path: stop deleted the Pod but kept the Workspace PVC, so a missing
         // Pod is recreated here (re-attaching the PVC). An existing Pod is left alone.
         val podName = resolvePodName(runtime)
@@ -141,8 +146,17 @@ class KubernetesRuntimeProvider(
         }
     }
 
-    private fun buildPod(runtime: Runtime, template: RuntimeTemplate, podName: String): V1Pod {
-        val spec = buildPodSpec(runtime, template)
+    private fun verifiedWorkspace(runtime: Runtime): Workspace {
+        val workspace = workspaceRepository.findById(runtime.workspaceId)
+            ?: throw KubernetesRuntimeException("Workspace not found for runtime ${runtime.id}")
+        if (!workspace.canAttachRuntime() || workspace.pvcNamespace != namespace) {
+            throw KubernetesRuntimeException("Workspace placement is not verified in the Runtime namespace for ${runtime.id}")
+        }
+        return workspace
+    }
+
+    private fun buildPod(runtime: Runtime, template: RuntimeTemplate, podName: String, workspace: Workspace): V1Pod {
+        val spec = buildPodSpec(runtime, template, workspace)
 
         return V1Pod()
             .metadata(
@@ -164,7 +178,7 @@ class KubernetesRuntimeProvider(
             .spec(spec)
     }
 
-    private fun buildPodSpec(runtime: Runtime, template: RuntimeTemplate): V1PodSpec {
+    private fun buildPodSpec(runtime: Runtime, template: RuntimeTemplate, workspace: Workspace): V1PodSpec {
         val resources = mergeResources(template.defaultResourcesJson, runtime.resourcesJson)
         val envVars = mergeEnv(template.defaultEnvJson, runtime.envJson)
 
@@ -196,7 +210,7 @@ class KubernetesRuntimeProvider(
                 .name("workspace")
                 .persistentVolumeClaim(
                     io.kubernetes.client.openapi.models.V1PersistentVolumeClaimVolumeSource()
-                        .claimName(Workspace.pvcNameFor(runtime.workspaceId))
+                        .claimName(workspace.resolvePvcName())
                 ),
             V1Volume()
                 .name("tmp")
