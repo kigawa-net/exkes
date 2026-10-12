@@ -336,6 +336,20 @@ class RuntimeReconcilerTest {
     }
 
     @Test
+    fun `Kubernetes PVC observation error revokes Runtime Ready without faking process death`() {
+        val rt = newRuntime()
+        runToRunning(rt)
+        assertNotNull(runtimes.findById(rt.id)!!.lastReadyObservedAt)
+        provisioner.beforeStatus = { throw IllegalStateException("live PVC UID cannot be verified") }
+        reconciler.reconcileOnce()
+        assertEquals(RuntimeStatus.RUNNING, status(rt.id))
+        assertNull(runtimes.findById(rt.id)!!.lastReadyObservedAt)
+        // A successful later observation can only reopen admission after live PVC verification.
+        reconciler.reconcileOnce()
+        assertNotNull(runtimes.findById(rt.id)!!.lastReadyObservedAt)
+    }
+
+    @Test
     fun `Workspace deleting clears fresh Ready observation of a running Pod`() {
         val rt = newRuntime()
         runToRunning(rt)
