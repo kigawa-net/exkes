@@ -11,6 +11,7 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import net.kigawa.exkes.common.config.DatabaseConfig
+import net.kigawa.exkes.common.db.RuntimeRepository
 import net.kigawa.exkes.common.db.WorkspaceRepository
 import net.kigawa.exkes.common.db.connectDatabase
 import net.kigawa.exkes.common.db.createDataSource
@@ -35,6 +36,7 @@ import net.kigawa.exkes.controller.workspace.resolvePvcName
 class WorkspaceReconcilerTest {
     private lateinit var dataSource: DataSource
     private lateinit var repository: WorkspaceRepository
+    private lateinit var runtimes: RuntimeRepository
 
     /**
      * Configurable fake so tests drive CREATING/DELETING transitions.
@@ -87,6 +89,7 @@ class WorkspaceReconcilerTest {
         runMigrations(dataSource)
         connectDatabase(dataSource)
         repository = WorkspaceRepository()
+        runtimes = RuntimeRepository()
     }
 
     private fun createWorkspace(nameSuffix: String = System.nanoTime().toString()): Workspace =
@@ -105,6 +108,7 @@ class WorkspaceReconcilerTest {
     ) = WorkspaceReconciler(
         repository = repository,
         provisioner = provisioner,
+        runtimeRepository = runtimes,
         intervalSeconds = 1,
         maxAttempts = maxAttempts,
         // 0 (disabled) by default so the pre-existing cases keep exercising the
@@ -134,6 +138,7 @@ class WorkspaceReconcilerTest {
         val reconciler = WorkspaceReconciler(
             repository = repository,
             provisioner = provisioner,
+            runtimeRepository = runtimes,
             resourceNamespace = "platform-exkes-stg-sandbox",
             creatingTimeoutSeconds = 0,
         )
@@ -158,6 +163,7 @@ class WorkspaceReconcilerTest {
         val reconciler = WorkspaceReconciler(
             repository = repository,
             provisioner = provisioner,
+            runtimeRepository = runtimes,
             resourceNamespace = "platform-exkes-stg-sandbox",
             maxAttempts = 3,
             creatingTimeoutSeconds = 0,
@@ -226,6 +232,33 @@ class WorkspaceReconcilerTest {
         assertNotNull(reloaded)
         assertEquals(WorkspaceStatus.ERROR, reloaded.status)
         assertEquals("boom", reloaded.errorMessage)
+    }
+
+    @Test
+    fun `deleting Workspace with a Runtime holds PVC deletion until writer proof exists`() {
+        val workspace = createWorkspace("runtime-block-${System.nanoTime()}")
+        val runtime = runtimes.create(workspace.id, "runtime-template", null, null, null, null)
+        assertNotNull(runtime.id)
+        assertTrue(repository.transition(workspace.id, WorkspaceStatus.CREATING, WorkspaceStatus.DELETING))
+
+        val provisioner = FakeProvisioner()
+        val reconciler = newReconciler(provisioner)
+        repeat(4) { reconciler.reconcileOnce() }
+
+        assertEquals(WorkspaceStatus.DELETING, repository.findById(workspace.id)!!.status)
+        assertTrue(provisioner.deleteRequestedNames.isEmpty())
+        assertTrue(runtimes.hasRuntimeHistory(workspace.id))
+    }
+
+    @Test
+    fun `deletion is allowed for a Workspace that has no Runtime history`() {
+        val workspace = createWorkspace("never-attached-${System.nanoTime()}")
+        assertTrue(repository.transition(workspace.id, WorkspaceStatus.CREATING, WorkspaceStatus.DELETING))
+        val provisioner = FakeProvisioner()
+        newReconciler(provisioner).reconcileOnce()
+        assertEquals(WorkspaceStatus.DELETED, repository.findById(workspace.id)!!.status)
+        assertEquals(listOf("ws-${workspace.id}"), provisioner.deleteRequestedNames)
+        assertTrue(!runtimes.hasRuntimeHistory(workspace.id))
     }
 
     @Test
