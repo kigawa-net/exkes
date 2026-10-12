@@ -6,10 +6,14 @@ import kotlinx.serialization.Serializable
  * Execution lifecycle as seen by the agent. Mirrors the control plane's state
  * machine (issue #8) but is declared here because runtime-agent must not depend
  * on exkes-common.
+ *
+ * [LOST] is non-terminal: processes of the execution could not be confirmed
+ * stopped, so the outcome is unknown. While any execution is LOST, new
+ * executions are refused. It only leaves LOST as FAILED, once the stop is confirmed.
  */
 @Serializable
 enum class ExecutionStatus {
-    QUEUED, STARTING, RUNNING, SUCCEEDED, FAILED, CANCELLED, TIMED_OUT;
+    QUEUED, STARTING, RUNNING, LOST, SUCCEEDED, FAILED, CANCELLED, TIMED_OUT;
 
     val isTerminal: Boolean get() = this in TERMINAL
 
@@ -18,8 +22,9 @@ enum class ExecutionStatus {
 
         private val ALLOWED: Map<ExecutionStatus, Set<ExecutionStatus>> = mapOf(
             QUEUED to setOf(STARTING, CANCELLED, FAILED),
-            STARTING to setOf(RUNNING, FAILED, CANCELLED),
-            RUNNING to setOf(SUCCEEDED, FAILED, CANCELLED, TIMED_OUT),
+            STARTING to setOf(RUNNING, FAILED, CANCELLED, LOST),
+            RUNNING to setOf(SUCCEEDED, FAILED, CANCELLED, TIMED_OUT, LOST),
+            LOST to setOf(FAILED),
         )
 
         fun canTransition(from: ExecutionStatus, to: ExecutionStatus): Boolean =

@@ -11,9 +11,14 @@ import io.ktor.server.testing.testApplication
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import net.kigawa.exkes.runtimeagent.execution.ExecutionRecord
+import net.kigawa.exkes.runtimeagent.execution.ExecutionStore
 import net.kigawa.exkes.runtimeagent.execution.InMemoryExecutionStore
+import java.io.IOException
+import java.nio.file.Files
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class ExecutionRoutesTest {
@@ -70,7 +75,56 @@ class ExecutionRoutesTest {
         assertEquals(HttpStatusCode.BadRequest, bad.status)
         val body = """{"id":"d1","command":["true"]}"""
         client.post("/v1/executions") { contentType(ContentType.Application.Json); setBody(body) }
-        val dup = client.post("/v1/executions") { contentType(ContentType.Application.Json); setBody(body) }
+        // Identical replay (e.g. after a lost response) is accepted without running again.
+        val replay = client.post("/v1/executions") { contentType(ContentType.Application.Json); setBody(body) }
+        assertEquals(HttpStatusCode.Accepted, replay.status)
+        val dup = client.post("/v1/executions") {
+            contentType(ContentType.Application.Json)
+            setBody("""{"id":"d1","command":["false"]}""")
+        }
         assertEquals(HttpStatusCode.Conflict, dup.status)
+    }
+
+    @Test
+    fun `persistence failure is a 500 and the process is never started`() = testApplication {
+        val marker = Files.createTempDirectory("agent-route-marker").resolve("started")
+        val failingStore = object : ExecutionStore {
+            override fun save(record: ExecutionRecord) = throw IOException("disk unavailable (test)")
+            override fun loadAll(): List<ExecutionRecord> = emptyList()
+        }
+        application { agentModule(failingStore) }
+        val resp = client.post("/v1/executions") {
+            contentType(ContentType.Application.Json)
+            setBody("""{"id":"p1","command":["sh","-c","touch $marker"]}""")
+        }
+        assertEquals(HttpStatusCode.InternalServerError, resp.status)
+        val body = resp.bodyAsText()
+        assertTrue(body.contains("\"INTERNAL\""), body)
+        assertFalse(body.contains("disk unavailable"), "internal details must not leak: $body")
+        Thread.sleep(200)
+        assertFalse(Files.exists(marker))
+    }
+
+    @Test
+    fun `evicted log chunks are reported as truncated and as a gap event`() = testApplication {
+        application { agentModule(InMemoryExecutionStore(), maxLogBytes = 1) }
+        client.post("/v1/executions") {
+            contentType(ContentType.Application.Json)
+            setBody("""{"id":"t1","command":["sh","-c","echo a; sleep 0.3; echo b; sleep 0.3; echo c"]}""")
+        }
+        // A reader that keeps up sees every chunk live.
+        val live = client.get("/v1/executions/t1/logs/stream").bodyAsText()
+        assertTrue(live.contains("\"data\":\"a\\n\""), live)
+        // A reader that starts after eviction is told about the gap before the surviving chunk.
+        val late = client.get("/v1/executions/t1/logs/stream").bodyAsText()
+        assertTrue(late.contains("event: gap\ndata: {\"after\":0,\"droppedBefore\":2}"), late)
+        assertFalse(late.contains("\"data\":\"a\\n\""), late)
+        assertTrue(late.contains("\"data\":\"c\\n\""), late)
+
+        val logs = client.get("/v1/executions/t1/logs?after=0").bodyAsText()
+        assertTrue(logs.contains("\"truncated\":true"), logs)
+        assertTrue(logs.contains("\"droppedBefore\":2"), logs)
+        val caughtUp = client.get("/v1/executions/t1/logs?after=2").bodyAsText()
+        assertTrue(caughtUp.contains("\"truncated\":false"), caughtUp)
     }
 }

@@ -12,7 +12,9 @@ import io.ktor.server.response.respondTextWriter
 import io.ktor.server.routing.get
 import io.ktor.server.routing.post
 import io.ktor.server.routing.routing
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import net.kigawa.exkes.runtimeagent.execution.ExecutionConflictException
@@ -30,8 +32,17 @@ data class ErrorResponse(val code: String, val message: String)
 @Serializable
 data class ExecutionList(val items: List<ExecutionSnapshot>)
 
+/**
+ * [droppedBefore] is the highest seq evicted from the bounded buffer (0 if none).
+ * [truncated] is true when chunks after the requested cursor were evicted, so the client has a gap.
+ */
 @Serializable
-data class LogsResponse(val chunks: List<LogChunk>, val finished: Boolean)
+data class LogsResponse(
+    val chunks: List<LogChunk>,
+    val finished: Boolean,
+    val droppedBefore: Long,
+    val truncated: Boolean,
+)
 
 private val logger = LoggerFactory.getLogger("ExecutionRoutes")
 private val sseJson = Json
@@ -65,14 +76,17 @@ fun Application.installAgentErrorPages() {
  * - GET  /v1/executions/{id}             status + exit code
  * - POST /v1/executions/{id}/cancel      cancel
  * - GET  /v1/executions/{id}/logs?after= ordered chunks with seq > after
- * - GET  /v1/executions/{id}/logs/stream text/event-stream; one `data:` JSON LogChunk per event,
- *                                        ends with `event: end` when the execution has finished
+ * - GET  /v1/executions/{id}/logs/stream text/event-stream; one `data:` JSON LogChunk per event.
+ *                                        `event: gap` reports chunks lost to the buffer limit.
+ *                                        Ends with `event: end` when the execution has finished
  */
 fun Application.configureExecutionRoutes(manager: ExecutionManager) {
     routing {
         post("/v1/executions") {
-            val snapshot = manager.start(call.receive<StartExecutionRequest>())
-            call.respond(HttpStatusCode.Accepted, snapshot)
+            val request = call.receive<StartExecutionRequest>()
+            // Blocking file I/O (state persistence) must not run on the Netty event loop.
+            val result = withContext(Dispatchers.IO) { manager.start(request) }
+            call.respond(HttpStatusCode.Accepted, result.snapshot)
         }
         get("/v1/executions") {
             call.respond(ExecutionList(manager.list()))
@@ -81,13 +95,14 @@ fun Application.configureExecutionRoutes(manager: ExecutionManager) {
             call.respond(manager.get(call.parameters["id"]!!))
         }
         post("/v1/executions/{id}/cancel") {
-            call.respond(HttpStatusCode.Accepted, manager.cancel(call.parameters["id"]!!))
+            val snapshot = withContext(Dispatchers.IO) { manager.cancel(call.parameters["id"]!!) }
+            call.respond(HttpStatusCode.Accepted, snapshot)
         }
         get("/v1/executions/{id}/logs") {
             val log = manager.log(call.parameters["id"]!!)
             val after = call.request.queryParameters["after"]?.toLongOrNull() ?: 0L
-            val (chunks, closed) = log.read(after)
-            call.respond(LogsResponse(chunks, closed))
+            val page = log.read(after)
+            call.respond(LogsResponse(page.chunks, page.finished, page.droppedBefore, truncated = page.droppedBefore > after))
         }
         get("/v1/executions/{id}/logs/stream") {
             val log = manager.log(call.parameters["id"]!!)
@@ -95,13 +110,19 @@ fun Application.configureExecutionRoutes(manager: ExecutionManager) {
             call.respondTextWriter(ContentType.Text.EventStream) {
                 while (true) {
                     val seen = log.version.value
-                    val (chunks, closed) = log.read(cursor)
-                    for (c in chunks) {
+                    val page = log.read(cursor)
+                    if (page.droppedBefore > cursor) {
+                        // Chunks in (cursor, droppedBefore] were evicted before this client read them.
+                        write("event: gap\ndata: {\"after\":$cursor,\"droppedBefore\":${page.droppedBefore}}\n\n")
+                        cursor = page.droppedBefore
+                    }
+                    for (c in page.chunks) {
                         write("data: ${sseJson.encodeToString(LogChunk.serializer(), c)}\n\n")
                         cursor = c.seq
                     }
                     flush()
-                    if (closed && log.read(cursor).first.isEmpty()) {
+                    // The read is atomic: a finished page already holds every remaining chunk.
+                    if (page.finished) {
                         write("event: end\ndata: {}\n\n")
                         flush()
                         break
