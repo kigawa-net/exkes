@@ -32,8 +32,8 @@ class MigrationH2Test {
     }
 
     @Test
-    fun `flyway applies v1 workspaces migration on h2`() = withMigratedDatabase { _, result ->
-        assertEquals(5, result.migrationsExecuted)
+    fun `flyway applies all migrations on h2`() = withMigratedDatabase { _, result ->
+        assertEquals(6, result.migrationsExecuted)
     }
 
     @Test
@@ -73,7 +73,8 @@ class MigrationH2Test {
                 stmt.executeQuery(
                     """
                     SELECT id, name, status, storage_class, storage_size,
-                           pvc_name, error_message, labels_json,
+                           pvc_name, pvc_namespace, pvc_uid, placement_generation, placement_state,
+                           error_message, labels_json,
                            archived_at, created_at, updated_at
                     FROM workspaces
                     """.trimIndent(),
@@ -101,6 +102,31 @@ class MigrationH2Test {
                 assertTrue(rs.next())
                 assertEquals("CREATING", rs.getString("status"))
                 assertEquals(1073741824L, rs.getLong("storage_size"))
+            }
+        }
+    }
+
+    @Test
+    fun `v6 leaves legacy workspace PVC placement unbound`() = withMigratedDatabase { dataSource, _ ->
+        dataSource.connection.use { conn ->
+            conn.createStatement().use { stmt ->
+                stmt.executeUpdate(
+                    """
+                    INSERT INTO workspaces
+                        (id, name, status, storage_class, storage_size, created_at, updated_at)
+                    VALUES ('3f0f3b1a-8e52-4a6e-9a41-1c1a2b3c4d5e', 'legacy-placement', 'READY',
+                            'rook-cephfs', 1073741824, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                    """.trimIndent(),
+                )
+                stmt.executeQuery(
+                    "SELECT pvc_namespace, pvc_uid, placement_generation, placement_state FROM workspaces",
+                ).use { rs ->
+                    assertTrue(rs.next())
+                    assertEquals(null, rs.getString("pvc_namespace"))
+                    assertEquals(null, rs.getString("pvc_uid"))
+                    assertEquals(0L, rs.getLong("placement_generation"))
+                    assertEquals("UNBOUND", rs.getString("placement_state"))
+                }
             }
         }
     }
