@@ -151,6 +151,21 @@ open class RuntimeRepository {
             ?.toRuntime()
     }
 
+    /**
+     * True if ANY Runtime record has ever referred to the Workspace, even if
+     * the Runtime is DELETED or FAILED. DB terminal state is not proof that an
+     * agent child process or writer has stopped. Deletion cannot proceed until
+     * a durable per-writer termination fence is implemented (#58/#31).
+     *
+     * Deliberately includes tombstones that list() excludes.
+     */
+    fun hasRuntimeHistory(workspaceId: String): Boolean = transaction {
+        RuntimesTable.selectAll()
+            .where { RuntimesTable.workspaceId eq workspaceId }
+            .limit(1)
+            .firstOrNull() != null
+    }
+
     fun list(
         workspaceId: String?,
         status: RuntimeStatus?,
