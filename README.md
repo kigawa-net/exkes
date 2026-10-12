@@ -126,7 +126,20 @@ docker build --build-arg MODULE=exkes-api -t exkes-api:local .
 | `GET /v1/workspaces?name=<name>` | 200 | Workspace 名の完全一致フィルタ（`DELETED` は含まない） |
 | `POST /v1/runtimes/{rt}/executions` | 202 | `labels`（任意、キー `[A-Za-z0-9][A-Za-z0-9._/-]{0,62}`、値 256 文字以下、最大 32 件）を受理・返却 |
 | `GET /v1/runtimes/{rt}/executions?label=<k>=<v>` | 200 | `label` を複数指定可（AND）。同じキーの重複指定は 400 |
-| `POST /v1/runtimes/{rt}/executions/{id}/cancel` | 202 / 200 / 404 | 非終端の Execution を `CANCELLED` にする（desired state の記録のみ。プロセス停止は runtime-agent）。既に終端なら 200 で現状を返す |
+| `POST /v1/runtimes/{rt}/executions/{id}/cancel` | 202 / 200 / 404 | `QUEUED` / `STARTING` / `RUNNING` を `CANCELLING`（取消要求済み・停止未確認）に遷移する。この呼び出しで遷移したら 202、既に `CANCELLING` または終端なら 200 で現状を返す |
+
+#### 取消の意味（重要）
+
+- `POST .../cancel` の 202 は「取消要求を受け付けた」だけの証明であり、**プロセスが停止した証明ではない**。
+- 応答の `status` は `CANCELLING`（非終端）。`cancelRequestedAt` に要求時刻が入る。
+- 停止確認は runtime-agent の仕事。プロセス（コンテナ）の終了を観測した後にのみ `CANCELLED` になる。
+  呼び出し側は `GET /v1/runtimes/{rt}/executions/{id}` を `status` が `CANCELLED` になるまで待つこと。
+  `CANCELLED` 以外（`CANCELLING` を含む）は「停止済み」と解釈してはならない（Workspace 削除・同一 Workspace での新規 Writer 起動は保留）。
+- `CANCELLING` の Execution は、プロセスが既に動いていた場合 `RUNNING` や `SUCCEEDED` 等へ遷移しうる（終了を観測した結果を優先する）。
+- `CANCELLED` への遷移は `ExecutionRepository.confirmCancelled(id, TerminationEvidence)` のみが行い、取消 API からは呼ばない。
+  現時点で呼び出し元（runtime-agent 側の停止確認経路）は未実装。
+- 未対応: Writer generation / authority epoch による fencing、停止証拠の API 公開（DB には `termination_*` 列として保存のみ）、
+  Kivra 側の Receipt 照合。
 
 エラーは共通形式 `{"code": "NOT_FOUND|CONFLICT|VALIDATION_ERROR|INTERNAL", "message": "..."}`。
 500 の場合、例外の詳細はサーバ側ログにのみ記録し（JDBC URL や Kubernetes API の

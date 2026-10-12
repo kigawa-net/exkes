@@ -12,6 +12,7 @@ import javax.sql.DataSource
 import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlinx.serialization.json.Json
@@ -24,6 +25,7 @@ import net.kigawa.exkes.api.workspace.WorkspaceService
 import net.kigawa.exkes.common.config.DatabaseConfig
 import net.kigawa.exkes.common.config.WorkspaceConfig
 import net.kigawa.exkes.common.db.ExecutionRepository
+import net.kigawa.exkes.common.domain.ExecutionStatus
 import net.kigawa.exkes.common.db.RuntimeRepository
 import net.kigawa.exkes.common.db.RuntimeTemplateRepository
 import net.kigawa.exkes.common.db.WorkspaceRepository
@@ -184,7 +186,7 @@ class RuntimeRoutesTest {
     }
 
     @Test
-    fun `cancel moves a queued execution to cancelled and is idempotent afterwards`() = testApplication {
+    fun `cancel records a request as CANCELLING, not CANCELLED, and is idempotent afterwards`() = testApplication {
         application { testModule() }
         val (_, runtimeId) = runningRuntime()
         val path = "/v1/runtimes/$runtimeId/executions"
@@ -193,11 +195,55 @@ class RuntimeRoutesTest {
 
         val cancelled = client.post("$path/$id/cancel")
         assertEquals(HttpStatusCode.Accepted, cancelled.status)
-        assertTrue(cancelled.bodyAsText().contains("\"status\":\"CANCELLED\""))
+        assertTrue(cancelled.bodyAsText().contains("\"status\":\"CANCELLING\""))
+        assertFalse(cancelled.bodyAsText().contains("\"status\":\"CANCELLED\""))
+        assertTrue(cancelled.bodyAsText().contains("\"cancelRequestedAt\":\""))
 
+        // Repeated cancel: 200 with the current state, no new transition.
         val again = client.post("$path/$id/cancel")
         assertEquals(HttpStatusCode.OK, again.status)
-        assertTrue(again.bodyAsText().contains("\"status\":\"CANCELLED\""))
+        assertTrue(again.bodyAsText().contains("\"status\":\"CANCELLING\""))
+
+        // GET reflects the same non-terminal state; a stop is not proven by the API.
+        val fetched = client.get("$path/$id")
+        assertTrue(fetched.bodyAsText().contains("\"status\":\"CANCELLING\""))
+        assertTrue(fetched.bodyAsText().contains("\"finishedAt\":null"))
+
+        // CANCELLING is non-terminal and shows up under the status filter.
+        val listed = client.get("$path?status=cancelling")
+        assertTrue(listed.bodyAsText().contains("\"total\":1"))
+    }
+
+    @Test
+    fun `cancel of a running execution keeps it non-terminal until the stop is confirmed`() = testApplication {
+        application { testModule() }
+        val (_, runtimeId) = runningRuntime()
+        val path = "/v1/runtimes/$runtimeId/executions"
+        val id = idOf(client.postJson(path, """{"type":"SYSTEM"}""").bodyAsText())
+        // Simulate runtime-agent having started the process.
+        assertTrue(executions.transition(id, ExecutionStatus.QUEUED, ExecutionStatus.STARTING))
+        assertTrue(executions.transition(id, ExecutionStatus.STARTING, ExecutionStatus.RUNNING))
+
+        val cancelled = client.post("$path/$id/cancel")
+        assertEquals(HttpStatusCode.Accepted, cancelled.status)
+        assertTrue(cancelled.bodyAsText().contains("\"status\":\"CANCELLING\""))
+        assertFalse(executions.findById(id)!!.isTerminal)
+    }
+
+    @Test
+    fun `cancel of a terminal execution returns it unchanged with 200`() = testApplication {
+        application { testModule() }
+        val (_, runtimeId) = runningRuntime()
+        val path = "/v1/runtimes/$runtimeId/executions"
+        val id = idOf(client.postJson(path, """{"type":"SYSTEM"}""").bodyAsText())
+        assertTrue(executions.transition(id, ExecutionStatus.QUEUED, ExecutionStatus.STARTING))
+        assertTrue(executions.transition(id, ExecutionStatus.STARTING, ExecutionStatus.RUNNING))
+        assertTrue(executions.transition(id, ExecutionStatus.RUNNING, ExecutionStatus.SUCCEEDED, exitCode = 0))
+
+        val response = client.post("$path/$id/cancel")
+        assertEquals(HttpStatusCode.OK, response.status)
+        assertTrue(response.bodyAsText().contains("\"status\":\"SUCCEEDED\""))
+        assertTrue(response.bodyAsText().contains("\"cancelRequestedAt\":null"))
     }
 
     @Test

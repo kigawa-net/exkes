@@ -36,7 +36,10 @@ class RuntimeConflictException(id: String) :
 class ExecutionConflictException(id: String) :
     RuntimeException("execution is being modified concurrently: $id")
 
-/** Result of [RuntimeService.cancelExecution]: [accepted] is false when the execution was already terminal. */
+/**
+ * Result of [RuntimeService.cancelExecution]. [accepted] is true only when this call moved the
+ * execution to CANCELLING; false when it was already CANCELLING or terminal (state returned as is).
+ */
 data class CancelResult(val execution: Execution, val accepted: Boolean)
 
 /**
@@ -326,17 +329,22 @@ class RuntimeService(
     }
 
     /**
-     * Requests cancellation: a non-terminal execution moves to CANCELLED (conditional UPDATE).
-     * A terminal execution is returned unchanged (accepted = false), so repeated cancels are
-     * harmless. Stopping the process is runtime-agent's job; this only records the request.
+     * Records a cancel request: a QUEUED / STARTING / RUNNING execution moves to CANCELLING
+     * (conditional UPDATE). CANCELLING and terminal executions are returned unchanged
+     * (accepted = false), so repeated cancels are harmless.
+     *
+     * This never sets CANCELLED. CANCELLING means "stop requested, not confirmed"; the process
+     * stop is performed by runtime-agent and confirmed via `ExecutionRepository.confirmCancelled`,
+     * which is not called from here.
      */
     suspend fun cancelExecution(runtimeId: String, id: String): CancelResult = onIoThread {
         repeat(MAX_TRANSITION_ATTEMPTS) {
             val execution = getExecutionBlocking(runtimeId, id)
             when {
-                execution.isTerminal -> return@onIoThread CancelResult(execution, accepted = false)
-                executionRepository.transition(id, execution.status, ExecutionStatus.CANCELLED) ->
-                    return@onIoThread CancelResult(execution.copy(status = ExecutionStatus.CANCELLED), accepted = true)
+                execution.isTerminal || execution.status == ExecutionStatus.CANCELLING ->
+                    return@onIoThread CancelResult(execution, accepted = false)
+                executionRepository.transition(id, execution.status, ExecutionStatus.CANCELLING) ->
+                    return@onIoThread CancelResult(getExecutionBlocking(runtimeId, id), accepted = true)
                 // Lost the race: loop re-reads the status and re-decides.
             }
         }

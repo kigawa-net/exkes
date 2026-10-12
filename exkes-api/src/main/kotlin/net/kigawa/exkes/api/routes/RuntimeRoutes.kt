@@ -149,8 +149,9 @@ fun Route.configureExecutionRoutes(service: RuntimeService) {
             call.respond(HttpStatusCode.OK, service.getExecution(runtimeId, id).toResponse())
         }
 
-        // Cancel records the request (non-terminal -> CANCELLED). 202 when the state changed,
-        // 200 with the unchanged execution when it was already terminal.
+        // Cancel records a request only (non-terminal -> CANCELLING). 202 when this call changed
+        // the state; 200 with the current execution when already CANCELLING or terminal.
+        // Stop is confirmed asynchronously: poll GET until status is CANCELLED.
         post("/{id}/cancel") {
             val runtimeId = call.parameters["runtimeId"] ?: throw InvalidWorkspaceRequestException("missing runtime id")
             val id = call.parameters["id"] ?: throw InvalidWorkspaceRequestException("missing execution id")

@@ -16,6 +16,13 @@ CREATE TABLE idempotency_keys (
 -- 一覧の label フィルタは execution_labels で行う。
 ALTER TABLE executions ADD COLUMN labels_json TEXT NULL;
 
+-- 取消要求（CANCELLING）の時刻。取消要求は停止の証明ではない。
+-- termination_* は runtime-agent が対象プロセスの終了を観測した証拠（CANCELLED へ遷移する時だけ埋まる）。
+ALTER TABLE executions ADD COLUMN cancel_requested_at TIMESTAMP NULL;
+ALTER TABLE executions ADD COLUMN termination_observed_by VARCHAR(256) NULL;
+ALTER TABLE executions ADD COLUMN termination_process_identity VARCHAR(512) NULL;
+ALTER TABLE executions ADD COLUMN termination_observed_at TIMESTAMP NULL;
+
 CREATE TABLE execution_labels (
     execution_id  VARCHAR(36)  NOT NULL,
     label_key     VARCHAR(63)  NOT NULL,

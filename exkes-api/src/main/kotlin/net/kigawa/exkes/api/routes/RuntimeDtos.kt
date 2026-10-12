@@ -70,6 +70,9 @@ data class ExecutionResponse(
     val startedAt: Instant?,
     @Serializable(with = InstantIsoSerializer::class)
     val finishedAt: Instant?,
+    /** Set when a cancel was requested (status CANCELLING or a later state). A request, not a stop proof. */
+    @Serializable(with = InstantIsoSerializer::class)
+    val cancelRequestedAt: Instant?,
 )
 
 @Serializable
@@ -146,4 +149,5 @@ fun net.kigawa.exkes.common.domain.Execution.toResponse(): ExecutionResponse = E
     updatedAt = updatedAt,
     startedAt = startedAt,
     finishedAt = finishedAt,
+    cancelRequestedAt = cancelRequestedAt,
 )
