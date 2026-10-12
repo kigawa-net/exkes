@@ -198,14 +198,6 @@ class RuntimeReconciler(
 
     private fun processRunning(runtimes: List<Runtime>) {
         for (runtime in runtimes) {
-            if (!isWorkspacePlacementValid(runtime)) {
-                // Do not re-open admission from a Ready observation on a stale
-                // or legacy Workspace; the Pod may still be physically running.
-                clearReady(runtime)
-                notReadySince.remove(runtime.id)
-                logger.warn("closed Runtime {} admission: Workspace placement is not verified", runtime.id)
-                continue
-            }
             // Check TTL expiry
             if (isExpired(runtime)) {
                 val message = "TTL expired (${runtime.ttlSeconds}s)"
@@ -213,6 +205,15 @@ class RuntimeReconciler(
                     attempts.remove(runtime.id)
                     logger.info("runtime {} moved to EXPIRED: {}", runtime.id, message)
                 }
+                continue
+            }
+
+            if (!isWorkspacePlacementValid(runtime)) {
+                // Keep TTL/lifecycle cleanup independent of Workspace admission.
+                // The old process may still be running: do not fake termination.
+                clearReady(runtime)
+                notReadySince.remove(runtime.id)
+                logger.warn("closed Runtime {} admission: Workspace placement is not verified", runtime.id)
                 continue
             }
 
@@ -242,12 +243,6 @@ class RuntimeReconciler(
      */
     private fun processDegraded(runtimes: List<Runtime>) {
         for (runtime in runtimes) {
-            if (!isWorkspacePlacementValid(runtime)) {
-                clearReady(runtime)
-                notReadySince.remove(runtime.id)
-                logger.warn("Runtime {} remains DEGRADED: Workspace placement is not verified", runtime.id)
-                continue
-            }
             if (isExpired(runtime)) {
                 val message = "TTL expired (${runtime.ttlSeconds}s)"
                 if (runtimeRepository.transition(runtime.id, RuntimeStatus.DEGRADED, RuntimeStatus.EXPIRED, message)) {
@@ -255,6 +250,13 @@ class RuntimeReconciler(
                     notReadySince.remove(runtime.id)
                     logger.info("runtime {} moved to EXPIRED: {}", runtime.id, message)
                 }
+                continue
+            }
+
+            if (!isWorkspacePlacementValid(runtime)) {
+                clearReady(runtime)
+                notReadySince.remove(runtime.id)
+                logger.warn("Runtime {} remains DEGRADED: Workspace placement is not verified", runtime.id)
                 continue
             }
 
