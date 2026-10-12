@@ -97,6 +97,32 @@ class RuntimeServiceTest {
     private fun observeNotReady(id: String) = assertEquals(true, runtimes.clearReadyObservation(id))
 
     @Test
+    fun `runtime creation refuses client-controlled identity labels`() {
+        val reservedKeys = listOf(
+            "app.kubernetes.io/managed-by",
+            "exkes.runtime-id",
+            "exkes.workspace-id",
+            "exkes.template-id",
+            "exkes.kigawa.net/runtime-id",
+            "exkes/custom",
+        )
+        for (key in reservedKeys) {
+            assertFailsWith<InvalidRuntimeRequestException>("reserved label $key must be rejected") {
+                runBlocking {
+                    service.createRuntime(
+                        workspaceId, templateId, null, null, null,
+                        mapOf(key to "forged"),
+                    )
+                }
+            }
+        }
+        val allowed = runBlocking {
+            service.createRuntime(workspaceId, templateId, null, null, null, mapOf("team" to "dev"))
+        }
+        assertEquals(workspaceId, allowed.value.workspaceId)
+    }
+
+    @Test
     fun `execution is accepted while runtime is running with a fresh ready observation`() {
         val rt = runtimeIn(RuntimeStatus.RUNNING)
         observeReady(rt.id)

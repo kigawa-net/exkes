@@ -150,12 +150,15 @@ class KubernetesRuntimeProvider(
                     .name(podName)
                     .namespace(namespace)
                     .labels(
-                        mapOf(
-                            "app.kubernetes.io/managed-by" to "exkes",
-                            "exkes.runtime-id" to runtime.id,
-                            "exkes.workspace-id" to runtime.workspaceId,
-                            "exkes.template-id" to runtime.templateId,
-                        ) + (runtime.labelsJson?.let { json.decodeFromString<Map<String, String>>(it) } ?: emptyMap()),
+                        // Defense in depth for older rows: system-owned identity wins
+                        // even if unvalidated client labels already exist in MariaDB.
+                        (runtime.labelsJson?.let { json.decodeFromString<Map<String, String>>(it) } ?: emptyMap()) +
+                            mapOf(
+                                "app.kubernetes.io/managed-by" to "exkes",
+                                "exkes.runtime-id" to runtime.id,
+                                "exkes.workspace-id" to runtime.workspaceId,
+                                "exkes.template-id" to runtime.templateId,
+                            ),
                     ),
             )
             .spec(spec)
