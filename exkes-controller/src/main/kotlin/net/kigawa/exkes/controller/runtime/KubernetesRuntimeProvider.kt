@@ -58,6 +58,7 @@ class KubernetesRuntimeProvider(
 
     override fun createRuntime(runtime: Runtime): String {
         val workspace = verifiedWorkspace(runtime)
+        verifyLivePvc(runtime, workspace)
         val template = templateRepository.findById(runtime.templateId)
             ?: throw RuntimeTemplateNotFoundException(runtime.templateId)
 
@@ -84,7 +85,7 @@ class KubernetesRuntimeProvider(
     }
 
     override fun startRuntime(runtime: Runtime) {
-        verifiedWorkspace(runtime)
+        verifyLivePvc(runtime, verifiedWorkspace(runtime))
         // Restart path: stop deleted the Pod but kept the Workspace PVC, so a missing
         // Pod is recreated here (re-attaching the PVC). An existing Pod is left alone.
         val podName = resolvePodName(runtime)
@@ -121,6 +122,9 @@ class KubernetesRuntimeProvider(
     }
 
     override fun getRuntimeStatus(runtime: Runtime): RuntimeStatus {
+        // A Pod can remain Ready after its PVC was recreated with the same name.
+        // Do not issue a Ready observation against an unverified live claim.
+        verifyLivePvc(runtime, verifiedWorkspace(runtime))
         val podName = resolvePodName(runtime)
         val pod = readPod(podName)
         return when {
@@ -153,6 +157,21 @@ class KubernetesRuntimeProvider(
             throw KubernetesRuntimeException("Workspace placement is not verified in the Runtime namespace for ${runtime.id}")
         }
         return workspace
+    }
+
+    /** Fail closed on Kubernetes API errors, missing PVC, UID drift or unbound claims. */
+    private fun verifyLivePvc(runtime: Runtime, workspace: Workspace) {
+        val name = workspace.resolvePvcName()
+        val pvc = try {
+            api.readNamespacedPersistentVolumeClaim(name, namespace).execute()
+        } catch (e: ApiException) {
+            throw RuntimePvcUnverifiedException("failed to read live PVC for runtime ${runtime.id} (HTTP ${e.code})", e)
+        }
+        try {
+            verifyRuntimeLivePvc(runtime, workspace, pvc, namespace)
+        } catch (e: IllegalArgumentException) {
+            throw RuntimePvcUnverifiedException("unverified live PVC for runtime ${runtime.id}: ${e.message}", e)
+        }
     }
 
     private fun buildPod(runtime: Runtime, template: RuntimeTemplate, podName: String, workspace: Workspace): V1Pod {
