@@ -3,11 +3,14 @@ package net.kigawa.exkes.controller.workspace
 import io.kubernetes.client.custom.Quantity
 import io.kubernetes.client.openapi.ApiException
 import io.kubernetes.client.openapi.apis.CoreV1Api
+import io.kubernetes.client.openapi.models.V1DeleteOptions
 import io.kubernetes.client.openapi.models.V1ObjectMeta
+import io.kubernetes.client.openapi.models.V1Preconditions
 import io.kubernetes.client.openapi.models.V1PersistentVolumeClaim
 import io.kubernetes.client.openapi.models.V1PersistentVolumeClaimSpec
 import io.kubernetes.client.openapi.models.V1VolumeResourceRequirements
 import net.kigawa.exkes.common.domain.Workspace
+import net.kigawa.exkes.common.domain.WorkspacePlacementState
 import net.kigawa.exkes.controller.config.KubernetesConfig
 import net.kigawa.exkes.controller.k8s.KubernetesClientFactory
 import org.slf4j.LoggerFactory
@@ -36,30 +39,64 @@ class KubernetesWorkspaceProvisioner(
     private val api: CoreV1Api by lazy { CoreV1Api(KubernetesClientFactory.createClient(config)) }
 
     override fun ensurePvc(workspace: Workspace): ProvisionOutcome {
+        require(workspace.pvcNamespace == config.resourceNamespace) {
+            "Workspace ${workspace.id} PVC namespace is not the controller resource namespace"
+        }
+        require(workspace.placementState == WorkspacePlacementState.RESERVED ||
+            workspace.placementState == WorkspacePlacementState.VERIFIED
+        ) { "Workspace ${workspace.id} PVC placement is not reserved/verified" }
+
         val name = workspace.resolvePvcName()
         val existing = readPvc(name)
+        if (existing == null && workspace.pvcUid != null) {
+            // A previously verified PVC vanished. Recreating the same name
+            // would silently attach an empty volume to an existing Workspace.
+            throw IllegalStateException("verified PVC $name disappeared; refuse replacement")
+        }
+        if (existing != null && workspace.pvcUid == null) {
+            // A matching label does NOT prove this PVC belongs to this Workspace.
+            // This includes a create-response-loss after which the object exists:
+            // operator reconciliation is required before binding the UID.
+            throw IllegalStateException("PVC $name exists without a trusted recorded UID")
+        }
+        // createPvc throws on 409; never adopt an unknown winner of a name race.
+        val created = existing == null
         val pvc = existing ?: createPvc(workspace, name)
-
+        val uid = verifyPvcIdentity(workspace, pvc, config.resourceNamespace)
         val state = when (pvc.status?.phase) {
             "Bound" -> PvcState.BOUND
-            // "Lost" means the backing volume is gone; surface it as a failure.
             "Lost" -> throw IllegalStateException("PVC $name is in phase Lost")
             else -> PvcState.PENDING
         }
-        return ProvisionOutcome(name, state)
+        return ProvisionOutcome(name, state, uid, createdByThisAttempt = created)
     }
 
     override fun deletePvc(workspace: Workspace): Boolean {
+        val namespace = requireNotNull(workspace.pvcNamespace) {
+            "Workspace ${workspace.id} has no recorded PVC namespace; deletion blocked"
+        }
+        require(namespace == config.resourceNamespace) {
+            "Workspace ${workspace.id} PVC namespace mismatch; deletion blocked"
+        }
+        require(workspace.placementState == WorkspacePlacementState.VERIFIED) {
+            "Workspace ${workspace.id} PVC identity is not verified; deletion blocked"
+        }
+        val uid = requireNotNull(workspace.pvcUid?.takeIf { it.isNotBlank() }) {
+            "Workspace ${workspace.id} has no verified PVC UID; deletion blocked"
+        }
         val name = workspace.resolvePvcName()
+        val pvc = readPvc(name) ?: return true
+        verifyPvcIdentity(workspace, pvc, namespace)
         try {
-            api.deleteNamespacedPersistentVolumeClaim(name, config.resourceNamespace)
+            api.deleteNamespacedPersistentVolumeClaim(name, namespace)
+                .body(V1DeleteOptions().preconditions(V1Preconditions().uid(uid)))
                 .propagationPolicy("Foreground")
                 .execute()
-            logger.info("delete requested for PVC {} of workspace {}", name, workspace.id)
-            // Deletion is confirmed by the next reconcile cycle (404).
+            logger.info("UID-preconditioned delete requested for PVC {} of workspace {}", name, workspace.id)
             return false
         } catch (e: ApiException) {
             if (e.code == 404) return true
+            // 409/422 precondition mismatch is never interpreted as success.
             throw e
         }
     }
@@ -99,12 +136,9 @@ class KubernetesWorkspaceProvisioner(
             api.createNamespacedPersistentVolumeClaim(config.resourceNamespace, pvc).execute()
                 .also { logger.info("created PVC {} for workspace {}", name, workspace.id) }
         } catch (e: ApiException) {
-            if (e.code == 409) {
-                // Lost a creation race; the next read observes the winner.
-                readPvc(name) ?: throw e
-            } else {
-                throw e
-            }
+            // An already existing PVC may be foreign, even with matching labels.
+            // Never adopt a 409 winner until its UID has been bound by trusted evidence.
+            throw e
         }
     }
 
