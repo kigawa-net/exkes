@@ -31,6 +31,9 @@ enum class ExecutionStatus {
     CANCELLED,
     TIMED_OUT; // semicolon required before companion object in enum class
 
+    val isTerminal: Boolean
+        get() = this == SUCCEEDED || this == FAILED || this == CANCELLED || this == TIMED_OUT
+
     companion object {
         private val ALLOWED_TRANSITIONS: Map<ExecutionStatus, Set<ExecutionStatus>> = mapOf(
             QUEUED to setOf(STARTING, CANCELLED),
@@ -66,8 +69,11 @@ data class Execution(
     val updatedAt: Instant,
     val startedAt: Instant?,
     val finishedAt: Instant?,
+    val labels: Map<String, String> = emptyMap(),
 ) {
     fun canTransitionTo(to: ExecutionStatus): Boolean = ExecutionStatus.canTransition(status, to)
+
+    val isTerminal: Boolean get() = status.isTerminal
 
     companion object {
         const val MAX_COMMAND_LENGTH: Int = 32768

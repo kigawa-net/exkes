@@ -10,6 +10,7 @@ import org.jetbrains.exposed.sql.Op
 import org.jetbrains.exposed.sql.SortOrder
 import org.jetbrains.exposed.sql.and
 import org.jetbrains.exposed.sql.insert
+import org.jetbrains.exposed.sql.SqlExpressionBuilder.inSubQuery
 import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.transactions.transaction
 import org.jetbrains.exposed.sql.update
@@ -33,6 +34,7 @@ class ExecutionRepository {
         type: ExecutionType,
         commandJson: String?,
         agentConfigJson: String?,
+        labels: Map<String, String> = emptyMap(),
     ): Execution = transaction {
         val id = UUID.randomUUID().toString()
         val now = nowUtc()
@@ -44,8 +46,16 @@ class ExecutionRepository {
             it[ExecutionsTable.status] = ExecutionStatus.QUEUED.name
             it[ExecutionsTable.commandJson] = commandJson
             it[ExecutionsTable.agentConfigJson] = agentConfigJson
+            it[ExecutionsTable.labelsJson] = if (labels.isEmpty()) null else json.encodeToString(labels)
             it[ExecutionsTable.createdAt] = now
             it[ExecutionsTable.updatedAt] = now
+        }
+        labels.forEach { (key, value) ->
+            ExecutionLabelsTable.insert {
+                it[ExecutionLabelsTable.executionId] = id
+                it[ExecutionLabelsTable.labelKey] = key
+                it[ExecutionLabelsTable.labelValue] = value
+            }
         }
 
         findByIdOrThrow(id)
@@ -62,11 +72,19 @@ class ExecutionRepository {
         status: ExecutionStatus?,
         limit: Int,
         offset: Int,
+        labels: Map<String, String> = emptyMap(),
     ): ExecutionListResult = transaction {
+        // Each label is a separate EXISTS-style subquery, so multiple labels are ANDed.
+        val labelFilter = labels.entries.fold<Map.Entry<String, String>, Op<Boolean>>(Op.TRUE) { acc, (key, value) ->
+            val matching = ExecutionLabelsTable
+                .select(ExecutionLabelsTable.executionId)
+                .where { (ExecutionLabelsTable.labelKey eq key) and (ExecutionLabelsTable.labelValue eq value) }
+            acc and ExecutionsTable.id.inSubQuery(matching)
+        }
         val rows = ExecutionsTable.selectAll().where {
             val rtFilter = runtimeId?.let { ExecutionsTable.runtimeId eq it } ?: Op.TRUE
             val statusFilter = status?.let { ExecutionsTable.status eq it.name } ?: Op.TRUE
-            rtFilter and statusFilter
+            rtFilter and statusFilter and labelFilter
         }
         val total = rows.count()
         val items = rows
@@ -138,6 +156,7 @@ class ExecutionRepository {
         updatedAt = this[ExecutionsTable.updatedAt],
         startedAt = this[ExecutionsTable.startedAt],
         finishedAt = this[ExecutionsTable.finishedAt],
+        labels = this[ExecutionsTable.labelsJson]?.let { json.decodeFromString<Map<String, String>>(it) } ?: emptyMap(),
     )
 
     companion object {

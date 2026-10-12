@@ -33,7 +33,7 @@ class MigrationH2Test {
 
     @Test
     fun `flyway applies v1 workspaces migration on h2`() = withMigratedDatabase { _, result ->
-        assertEquals(4, result.migrationsExecuted)
+        assertEquals(5, result.migrationsExecuted)
     }
 
     @Test
@@ -42,6 +42,25 @@ class MigrationH2Test {
             conn.createStatement().use { stmt ->
                 stmt.executeQuery("SELECT last_ready_observed_at FROM runtimes").use { rs ->
                     assertTrue(rs.next().not(), "fresh runtimes table must be empty")
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `v5 creates idempotency keys and execution labels tables`() = withMigratedDatabase { dataSource, _ ->
+        dataSource.connection.use { conn ->
+            conn.createStatement().use { stmt ->
+                stmt.executeQuery(
+                    """
+                    SELECT scope, idempotency_key, request_digest, resource_id, created_at FROM idempotency_keys
+                    """.trimIndent(),
+                ).use { rs -> assertTrue(rs.next().not(), "fresh idempotency_keys table must be empty") }
+                stmt.executeQuery(
+                    "SELECT execution_id, label_key, label_value FROM execution_labels",
+                ).use { rs -> assertTrue(rs.next().not(), "fresh execution_labels table must be empty") }
+                stmt.executeQuery("SELECT labels_json FROM executions").use { rs ->
+                    assertTrue(rs.next().not(), "fresh executions table must be empty")
                 }
             }
         }

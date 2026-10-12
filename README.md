@@ -106,6 +106,28 @@ docker build --build-arg MODULE=exkes-api -t exkes-api:local .
 | `DELETE /v1/workspaces/{id}` | 202 / 404 / 409 | 削除要求（`DELETING` へ遷移、PVC 削除は非同期）。404 = 未存在/削除済み、409 = 競合書き込みで条件付き UPDATE が 3 回とも失敗 |
 | `GET /health` | 200 | liveness / readiness probe 用 |
 
+#### Idempotency-Key（POST の再送安全性）
+
+`POST /v1/workspaces`、`POST /v1/workspaces/{ws}/runtimes`、`POST /v1/runtimes/{rt}/executions` は
+任意の `Idempotency-Key` ヘッダを受け付ける。
+
+- 値は 1〜255 文字の可視 ASCII。不正な値は 400 `VALIDATION_ERROR`。
+- 同じキー・同じ要求内容（正規化した SHA-256 の一致）の再送は、最初に作成されたリソースを 202 で返す。
+  新しいリソースは作られず、応答に `Idempotent-Replayed: true` が付く。
+- 同じキーで要求内容が違う場合は 422 `VALIDATION_ERROR`。
+- キーの範囲は操作ごと（`workspaces` / `runtimes:<workspaceId>` / `executions:<runtimeId>`）。
+- キーの記録は Flyway `V4__idempotency_and_execution_labels.sql` の `idempotency_keys` テーブルに保存する。
+- キーを省略した場合は従来どおり（再送を束ねない）。
+
+#### 一覧フィルタ・取消（Kivra 連携向け）
+
+| Method / Path | 応答 | 説明 |
+|---|---|---|
+| `GET /v1/workspaces?name=<name>` | 200 | Workspace 名の完全一致フィルタ（`DELETED` は含まない） |
+| `POST /v1/runtimes/{rt}/executions` | 202 | `labels`（任意、キー `[A-Za-z0-9][A-Za-z0-9._/-]{0,62}`、値 256 文字以下、最大 32 件）を受理・返却 |
+| `GET /v1/runtimes/{rt}/executions?label=<k>=<v>` | 200 | `label` を複数指定可（AND）。同じキーの重複指定は 400 |
+| `POST /v1/runtimes/{rt}/executions/{id}/cancel` | 202 / 200 / 404 | 非終端の Execution を `CANCELLED` にする（desired state の記録のみ。プロセス停止は runtime-agent）。既に終端なら 200 で現状を返す |
+
 エラーは共通形式 `{"code": "NOT_FOUND|CONFLICT|VALIDATION_ERROR|INTERNAL", "message": "..."}`。
 500 の場合、例外の詳細はサーバ側ログにのみ記録し（JDBC URL や Kubernetes API の
 レスポンス本文など秘密 Informationenがクライアントへ漏洩しないよう）、メッセージは

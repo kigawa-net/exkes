@@ -2,7 +2,12 @@ package net.kigawa.exkes.api.workspace
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonObject
 import net.kigawa.exkes.common.config.WorkspaceConfig
+import net.kigawa.exkes.common.db.IdempotentResult
+import net.kigawa.exkes.common.db.IdempotencyRepository
 import net.kigawa.exkes.common.db.WorkspaceListResult
 import net.kigawa.exkes.common.db.WorkspaceRepository
 import net.kigawa.exkes.common.domain.Workspace
@@ -35,34 +40,61 @@ class WorkspaceConflictException(id: String) :
 class WorkspaceService(
     private val repository: WorkspaceRepository,
     private val workspaceConfig: WorkspaceConfig,
+    private val idempotencyRepository: IdempotencyRepository = IdempotencyRepository(),
 ) {
+    /**
+     * Creates a workspace. With [idempotencyKey], a repeated request with the same key
+     * and body returns the workspace created first (replayed = true, no new row).
+     */
     suspend fun create(
         name: String,
         storageSizeBytes: Long?,
         labels: Map<String, String>?,
-    ): Workspace = onIoThread {
+        idempotencyKey: String? = null,
+    ): IdempotentResult<Workspace> = onIoThread {
         validateName(name)
         val size = storageSizeBytes ?: workspaceConfig.defaultStorageSizeBytes
         if (size <= 0) {
             throw InvalidWorkspaceRequestException("storageSizeBytes must be positive: $size")
         }
-        // Re-thrown as 409 by the routes layer.
-        repository.create(
-            name = name,
-            storageClass = workspaceConfig.storageClass,
-            storageSizeBytes = size,
-            labels = labels ?: emptyMap(),
-        )
+        val effectiveLabels = labels ?: emptyMap()
+        val createFresh = {
+            // Re-thrown as 409 by the routes layer.
+            repository.create(
+                name = name,
+                storageClass = workspaceConfig.storageClass,
+                storageSizeBytes = size,
+                labels = effectiveLabels,
+            )
+        }
+        if (idempotencyKey == null) {
+            IdempotentResult(createFresh(), replayed = false)
+        } else {
+            idempotencyRepository.execute(
+                scope = IDEMPOTENCY_SCOPE,
+                key = idempotencyKey,
+                requestDigest = IdempotencyRepository.digestOf(
+                    buildJsonObject {
+                        put("name", name)
+                        put("storageSizeBytes", size)
+                        putJsonObject("labels") { effectiveLabels.toSortedMap().forEach { (k, v) -> put(k, v) } }
+                    },
+                ),
+                load = { repository.findById(it) },
+                create = createFresh,
+                idOf = { it.id },
+            )
+        }
     }
 
-    suspend fun list(status: WorkspaceStatus?, limit: Int, offset: Int): WorkspaceListResult = onIoThread {
+    suspend fun list(status: WorkspaceStatus?, limit: Int, offset: Int, name: String? = null): WorkspaceListResult = onIoThread {
         if (limit < 1 || limit > MAX_LIMIT) {
             throw InvalidWorkspaceRequestException("limit must be between 1 and $MAX_LIMIT: $limit")
         }
         if (offset < 0) {
             throw InvalidWorkspaceRequestException("offset must not be negative: $offset")
         }
-        repository.list(status, limit, offset)
+        repository.list(status, limit, offset, name)
     }
 
     /** Returns the workspace; DELETED rows count as gone (404, plan chapter 6.2). */
@@ -128,6 +160,8 @@ class WorkspaceService(
 
     companion object {
         const val MAX_LIMIT = 500
+
+        const val IDEMPOTENCY_SCOPE = "workspaces"
 
         /** Upper bound on re-read/re-decide rounds when a concurrent writer keeps winning. */
         const val MAX_DELETE_ATTEMPTS = 3

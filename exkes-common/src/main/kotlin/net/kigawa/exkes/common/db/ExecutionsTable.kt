@@ -19,6 +19,7 @@ object ExecutionsTable : Table("executions") {
     val errorMessage = text("error_message").nullable()
     val logObjectKey = varchar("log_object_key", 256).nullable()
     val artifactObjectKeysJson = text("artifact_object_keys_json").nullable()
+    val labelsJson = text("labels_json").nullable()
     val createdAt = timestamp("created_at")
     val updatedAt = timestamp("updated_at")
     val startedAt = timestamp("started_at").nullable()

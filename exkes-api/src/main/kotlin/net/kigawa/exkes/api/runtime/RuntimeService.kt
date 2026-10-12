@@ -4,6 +4,13 @@ import java.time.Duration
 import java.time.Instant
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonObject
+import net.kigawa.exkes.common.db.IdempotentResult
+import net.kigawa.exkes.common.db.IdempotencyRepository
 import net.kigawa.exkes.common.db.ExecutionListResult
 import net.kigawa.exkes.common.db.ExecutionRepository
 import net.kigawa.exkes.common.db.RuntimeListResult
@@ -25,6 +32,12 @@ class InvalidRuntimeRequestException(message: String) : RuntimeException(message
 
 class RuntimeConflictException(id: String) :
     RuntimeException("runtime is being modified concurrently: $id")
+
+class ExecutionConflictException(id: String) :
+    RuntimeException("execution is being modified concurrently: $id")
+
+/** Result of [RuntimeService.cancelExecution]: [accepted] is false when the execution was already terminal. */
+data class CancelResult(val execution: Execution, val accepted: Boolean)
 
 /**
  * The runtime is RUNNING in the DB but is not admitting Executions: no fresh Ready
@@ -58,11 +71,17 @@ class RuntimeService(
      */
     private val admissionFreshnessSeconds: Long = DEFAULT_ADMISSION_FRESHNESS_SECONDS,
     private val clock: () -> Instant = Instant::now,
+    private val idempotencyRepository: IdempotencyRepository = IdempotencyRepository(),
 ) {
     init {
         require(admissionFreshnessSeconds > 0) { "admissionFreshnessSeconds must be positive: $admissionFreshnessSeconds" }
     }
 
+    /**
+     * Creates a runtime. With [idempotencyKey], a repeated request with the same key and
+     * body returns the runtime created first (replayed = true). Validation runs only for a
+     * fresh create, so a replay still answers after the workspace has left READY.
+     */
     suspend fun createRuntime(
         workspaceId: String,
         templateId: String,
@@ -70,31 +89,55 @@ class RuntimeService(
         envJson: String?,
         ttlSeconds: Long?,
         labels: Map<String, String>?,
-    ): Runtime = onIoThread {
-        // Validate workspace exists and is attachable
-        val workspace = workspaceRepository.findById(workspaceId)
-            ?: throw RuntimeNotFoundException("workspace not found: $workspaceId")
-        if (!workspace.canAttachRuntime()) {
-            throw InvalidRuntimeRequestException("workspace ${workspaceId} is not attachable (status=${workspace.status})")
+        idempotencyKey: String? = null,
+    ): IdempotentResult<Runtime> = onIoThread {
+        val createFresh = {
+            // Validate workspace exists and is attachable
+            val workspace = workspaceRepository.findById(workspaceId)
+                ?: throw RuntimeNotFoundException("workspace not found: $workspaceId")
+            if (!workspace.canAttachRuntime()) {
+                throw InvalidRuntimeRequestException("workspace ${workspaceId} is not attachable (status=${workspace.status})")
+            }
+
+            // Validate template exists
+            templateRepository.findById(templateId)
+                ?: throw InvalidRuntimeRequestException("runtime template not found: $templateId")
+
+            // Validate TTL
+            if (ttlSeconds != null && ttlSeconds <= 0) {
+                throw InvalidRuntimeRequestException("ttlSeconds must be positive: $ttlSeconds")
+            }
+
+            runtimeRepository.create(
+                workspaceId = workspaceId,
+                templateId = templateId,
+                resourcesJson = resourcesJson,
+                envJson = envJson,
+                ttlSeconds = ttlSeconds,
+                labelsJson = labels?.let { kotlinx.serialization.json.Json { ignoreUnknownKeys = true }.encodeToString(it) },
+            )
         }
-
-        // Validate template exists
-        val template = templateRepository.findById(templateId)
-            ?: throw InvalidRuntimeRequestException("runtime template not found: $templateId")
-
-        // Validate TTL
-        if (ttlSeconds != null && ttlSeconds <= 0) {
-            throw InvalidRuntimeRequestException("ttlSeconds must be positive: $ttlSeconds")
+        if (idempotencyKey == null) {
+            IdempotentResult(createFresh(), replayed = false)
+        } else {
+            idempotencyRepository.execute(
+                scope = "runtimes:$workspaceId",
+                key = idempotencyKey,
+                requestDigest = IdempotencyRepository.digestOf(
+                    buildJsonObject {
+                        put("workspaceId", workspaceId)
+                        put("templateId", templateId)
+                        put("resourcesJson", resourcesJson?.let { JsonPrimitive(it) } ?: JsonNull)
+                        put("envJson", envJson?.let { JsonPrimitive(it) } ?: JsonNull)
+                        put("ttlSeconds", ttlSeconds?.let { JsonPrimitive(it) } ?: JsonNull)
+                        putJsonObject("labels") { (labels ?: emptyMap()).toSortedMap().forEach { (k, v) -> put(k, v) } }
+                    },
+                ),
+                load = { runtimeRepository.findById(it) },
+                create = createFresh,
+                idOf = { it.id },
+            )
         }
-
-        runtimeRepository.create(
-            workspaceId = workspaceId,
-            templateId = templateId,
-            resourcesJson = resourcesJson,
-            envJson = envJson,
-            ttlSeconds = ttlSeconds,
-            labelsJson = labels?.let { kotlinx.serialization.json.Json { ignoreUnknownKeys = true }.encodeToString(it) },
-        )
     }
 
     suspend fun listRuntimes(
@@ -177,59 +220,93 @@ class RuntimeService(
 
     // --- Execution API ---
 
+    /**
+     * Creates an execution. With [idempotencyKey], a repeated request with the same key and
+     * body returns the execution created first (replayed = true, no second execution).
+     */
     suspend fun createExecution(
         runtimeId: String,
         type: ExecutionType,
         commandJson: String?,
         agentConfigJson: String?,
-    ): Execution = onIoThread {
-        // Validate runtime exists and is in a state that can run executions
-        val runtime = runtimeRepository.findById(runtimeId)
-            ?: throw RuntimeNotFoundException(runtimeId)
-        if (runtime.status != RuntimeStatus.RUNNING) {
-            throw InvalidRuntimeRequestException("runtime ${runtimeId} is not RUNNING (status=${runtime.status})")
-        }
-        // The DB status alone is not enough: the controller may be down, or the Pod may have
-        // turned NotReady since the last observation. Require a fresh Ready observation.
-        // Compare full Duration values: Duration.seconds truncates, so 15.9999s would read as 15s and a stale
-        // observation could still be admitted at the boundary.
-        val now = clock()
-        val readyAt = runtime.lastReadyObservedAt
-            ?: throw RuntimeNotAdmittingException(runtimeId, "no Ready observation")
-        if (Duration.between(readyAt, now) > Duration.ofSeconds(admissionFreshnessSeconds)) {
-            throw RuntimeNotAdmittingException(runtimeId, "last Ready observation is stale")
-        }
-        if (readyAt.isAfter(now.plusSeconds(admissionFreshnessSeconds))) {
-            throw RuntimeNotAdmittingException(runtimeId, "Ready observation is in the future")
-        }
-        // Same TTL rule as the controller: a runtime past its TTL must not start new work
-        // while the controller has not yet moved it to EXPIRED.
-        val ttl = runtime.ttlSeconds
-        if (ttl != null && ttl > 0 && Duration.between(runtime.createdAt, now) >= Duration.ofSeconds(ttl.toLong())) {
-            throw RuntimeNotAdmittingException(runtimeId, "TTL has expired")
-        }
+        labels: Map<String, String>? = null,
+        idempotencyKey: String? = null,
+    ): IdempotentResult<Execution> = onIoThread {
+        val effectiveLabels = labels ?: emptyMap()
+        validateLabels(effectiveLabels)
+        // Runs only for a fresh create. A replay (same Idempotency-Key) is answered from the
+        // stored record before this lambda is reached, so a closed Admission never produces a
+        // new Execution, and a replay of an existing one still returns it.
+        val createFresh = {
+            // Validate runtime exists and is in a state that can run executions
+            val runtime = runtimeRepository.findById(runtimeId)
+                ?: throw RuntimeNotFoundException(runtimeId)
+            if (runtime.status != RuntimeStatus.RUNNING) {
+                throw InvalidRuntimeRequestException("runtime ${runtimeId} is not RUNNING (status=${runtime.status})")
+            }
+            // The DB status alone is not enough: the controller may be down, or the Pod may have
+            // turned NotReady since the last observation. Require a fresh Ready observation.
+            // Compare full Duration values: Duration.seconds truncates, so 15.9999s would read as 15s and a stale
+            // observation could still be admitted at the boundary.
+            val now = clock()
+            val readyAt = runtime.lastReadyObservedAt
+                ?: throw RuntimeNotAdmittingException(runtimeId, "no Ready observation")
+            if (Duration.between(readyAt, now) > Duration.ofSeconds(admissionFreshnessSeconds)) {
+                throw RuntimeNotAdmittingException(runtimeId, "last Ready observation is stale")
+            }
+            if (readyAt.isAfter(now.plusSeconds(admissionFreshnessSeconds))) {
+                throw RuntimeNotAdmittingException(runtimeId, "Ready observation is in the future")
+            }
+            // Same TTL rule as the controller: a runtime past its TTL must not start new work
+            // while the controller has not yet moved it to EXPIRED.
+            val ttl = runtime.ttlSeconds
+            if (ttl != null && ttl > 0 && Duration.between(runtime.createdAt, now) >= Duration.ofSeconds(ttl.toLong())) {
+                throw RuntimeNotAdmittingException(runtimeId, "TTL has expired")
+            }
 
-        // Validate type-specific payload
-        when (type) {
-            ExecutionType.COMMAND -> {
-                if (commandJson == null || commandJson.isBlank()) {
-                    throw InvalidRuntimeRequestException("commandJson is required for COMMAND type")
+            // Validate type-specific payload
+            when (type) {
+                ExecutionType.COMMAND -> {
+                    if (commandJson == null || commandJson.isBlank()) {
+                        throw InvalidRuntimeRequestException("commandJson is required for COMMAND type")
+                    }
+                }
+                ExecutionType.AGENT -> {
+                    // agentConfigJson is optional for AGENT
+                }
+                ExecutionType.SYSTEM -> {
+                    // No payload required
                 }
             }
-            ExecutionType.AGENT -> {
-                // agentConfigJson is optional for AGENT
-            }
-            ExecutionType.SYSTEM -> {
-                // No payload required
-            }
-        }
 
-        executionRepository.create(
-            runtimeId = runtimeId,
-            type = type,
-            commandJson = commandJson,
-            agentConfigJson = agentConfigJson,
-        )
+            executionRepository.create(
+                runtimeId = runtimeId,
+                type = type,
+                commandJson = commandJson,
+                agentConfigJson = agentConfigJson,
+                labels = effectiveLabels,
+            )
+        }
+        if (idempotencyKey == null) {
+            IdempotentResult(createFresh(), replayed = false)
+        } else {
+            idempotencyRepository.execute(
+                scope = "executions:$runtimeId",
+                key = idempotencyKey,
+                requestDigest = IdempotencyRepository.digestOf(
+                    buildJsonObject {
+                        put("runtimeId", runtimeId)
+                        put("type", type.name)
+                        put("commandJson", commandJson?.let { JsonPrimitive(it) } ?: JsonNull)
+                        put("agentConfigJson", agentConfigJson?.let { JsonPrimitive(it) } ?: JsonNull)
+                        putJsonObject("labels") { effectiveLabels.toSortedMap().forEach { (k, v) -> put(k, v) } }
+                    },
+                ),
+                load = { executionRepository.findById(it) },
+                create = createFresh,
+                idOf = { it.id },
+            )
+        }
     }
 
     suspend fun listExecutions(
@@ -237,6 +314,7 @@ class RuntimeService(
         status: ExecutionStatus?,
         limit: Int,
         offset: Int,
+        labels: Map<String, String> = emptyMap(),
     ): ExecutionListResult = onIoThread {
         if (limit < 1 || limit > MAX_LIMIT) {
             throw InvalidRuntimeRequestException("limit must be between 1 and $MAX_LIMIT: $limit")
@@ -244,16 +322,53 @@ class RuntimeService(
         if (offset < 0) {
             throw InvalidRuntimeRequestException("offset must not be negative: $offset")
         }
-        executionRepository.list(runtimeId = runtimeId, status = status, limit = limit, offset = offset)
+        executionRepository.list(runtimeId = runtimeId, status = status, limit = limit, offset = offset, labels = labels)
+    }
+
+    /**
+     * Requests cancellation: a non-terminal execution moves to CANCELLED (conditional UPDATE).
+     * A terminal execution is returned unchanged (accepted = false), so repeated cancels are
+     * harmless. Stopping the process is runtime-agent's job; this only records the request.
+     */
+    suspend fun cancelExecution(runtimeId: String, id: String): CancelResult = onIoThread {
+        repeat(MAX_TRANSITION_ATTEMPTS) {
+            val execution = getExecutionBlocking(runtimeId, id)
+            when {
+                execution.isTerminal -> return@onIoThread CancelResult(execution, accepted = false)
+                executionRepository.transition(id, execution.status, ExecutionStatus.CANCELLED) ->
+                    return@onIoThread CancelResult(execution.copy(status = ExecutionStatus.CANCELLED), accepted = true)
+                // Lost the race: loop re-reads the status and re-decides.
+            }
+        }
+        throw ExecutionConflictException(id)
     }
 
     /** Returns the execution; validates it belongs to the runtime. */
     suspend fun getExecution(runtimeId: String, id: String): Execution = onIoThread {
+        getExecutionBlocking(runtimeId, id)
+    }
+
+    private fun getExecutionBlocking(runtimeId: String, id: String): Execution {
         val execution = executionRepository.findById(id)
         if (execution == null || execution.runtimeId != runtimeId) {
             throw ExecutionNotFoundException(id)
         }
-        execution
+        return execution
+    }
+
+    /** Execution labels: key `[A-Za-z0-9][A-Za-z0-9._/-]{0,62}`, value up to 256 chars, at most 32 entries. */
+    private fun validateLabels(labels: Map<String, String>) {
+        if (labels.size > MAX_LABELS) {
+            throw InvalidRuntimeRequestException("labels must have at most $MAX_LABELS entries: ${labels.size}")
+        }
+        labels.forEach { (key, value) ->
+            if (!LABEL_KEY_PATTERN.matches(key)) {
+                throw InvalidRuntimeRequestException("invalid label key: $key")
+            }
+            if (value.length > MAX_LABEL_VALUE_LENGTH) {
+                throw InvalidRuntimeRequestException("label value for $key must be at most $MAX_LABEL_VALUE_LENGTH chars")
+            }
+        }
     }
 
     private fun getBlocking(workspaceId: String, id: String): Runtime {
@@ -268,6 +383,9 @@ class RuntimeService(
         const val MAX_LIMIT = 500
         const val MAX_TRANSITION_ATTEMPTS = 3
         const val DEFAULT_ADMISSION_FRESHNESS_SECONDS = 15L
+        const val MAX_LABELS = 32
+        const val MAX_LABEL_VALUE_LENGTH = 256
+        private val LABEL_KEY_PATTERN = Regex("[A-Za-z0-9][A-Za-z0-9._/-]{0,62}")
 
         /** Blocking JDBC must not run on a Netty event loop thread. */
         private suspend fun <T> onIoThread(block: () -> T): T = withContext(Dispatchers.IO) { block() }
