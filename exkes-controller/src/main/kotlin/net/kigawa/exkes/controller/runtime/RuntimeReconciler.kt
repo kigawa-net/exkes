@@ -233,7 +233,11 @@ class RuntimeReconciler(
                     else -> Unit
                 }
             } catch (e: Exception) {
-                logger.warn("failed to check status for runtime {}: {}", runtime.id, e.message)
+                // An unavailable or changed live PVC cannot authorize a fresh
+                // Ready grant. Retain RUNNING/DEGRADED lifecycle until the old
+                // Pod/Writer is reconciled with termination evidence (#31).
+                clearReady(runtime)
+                logger.warn("failed to verify runtime {} status / PVC identity; admission closed: {}", runtime.id, e.message)
             }
         }
     }
@@ -279,7 +283,11 @@ class RuntimeReconciler(
                     else -> Unit
                 }
             } catch (e: Exception) {
-                logger.warn("failed to check status for runtime {}: {}", runtime.id, e.message)
+                // An unavailable or changed live PVC cannot authorize a fresh
+                // Ready grant. Retain RUNNING/DEGRADED lifecycle until the old
+                // Pod/Writer is reconciled with termination evidence (#31).
+                clearReady(runtime)
+                logger.warn("failed to verify runtime {} status / PVC identity; admission closed: {}", runtime.id, e.message)
             }
         }
     }
