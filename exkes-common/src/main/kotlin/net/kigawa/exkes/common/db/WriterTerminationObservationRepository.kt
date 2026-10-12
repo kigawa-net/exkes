@@ -86,18 +86,18 @@ class WriterTerminationObservationRepository {
         val id = UUID.randomUUID().toString()
         WriterTerminationObservationsTable.insert {
             it[WriterTerminationObservationsTable.id] = id
-            it[workspaceId] = runtime.workspaceId
-            it[workspacePlacementGeneration] = generation
-            it[workspacePvcUid] = pvcUid
+            it[WriterTerminationObservationsTable.workspaceId] = runtime.workspaceId
+            it[WriterTerminationObservationsTable.workspacePlacementGeneration] = generation
+            it[WriterTerminationObservationsTable.workspacePvcUid] = pvcUid
             it[WriterTerminationObservationsTable.runtimeId] = runtimeId
             it[WriterTerminationObservationsTable.podUid] = podUid
             it[WriterTerminationObservationsTable.writerGeneration] = writerGeneration
-            it[evidenceSource] = source.name
-            it[evidenceKind] = kind.name
-            it[observationStatus] = status.name
+            it[WriterTerminationObservationsTable.evidenceSource] = source.name
+            it[WriterTerminationObservationsTable.evidenceKind] = kind.name
+            it[WriterTerminationObservationsTable.observationStatus] = status.name
             it[WriterTerminationObservationsTable.evidenceDigest] = evidenceDigest
             it[WriterTerminationObservationsTable.observedAt] = observedAt
-            it[createdAt] = now
+            it[WriterTerminationObservationsTable.createdAt] = now
         }
         requireNotNull(findById(id))
     }
