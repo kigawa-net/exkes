@@ -110,6 +110,41 @@ open class RuntimeRepository {
         findByIdOrThrow(id)
     }
 
+    /**
+     * Atomic STOPPED -> STARTING admission. The same Workspace row lock used
+     * by fresh Runtime CREATE and Workspace DELETE orders all three intents.
+     * Existing Runtime may restart only against its original PVC UID/namespace
+     * and placement generation; no legacy/replacement implicit migration.
+     */
+    fun startBoundRuntime(id: String, workspaceId: String): Boolean = transaction {
+        WorkspacesTable.selectAll()
+            .where { WorkspacesTable.id eq workspaceId }
+            .forUpdate()
+            .singleOrNull()
+            ?: throw WorkspacePlacementAdmissionException("workspace not found")
+
+        val workspace = WorkspaceRepository().findById(workspaceId)
+            ?: throw WorkspacePlacementAdmissionException("workspace not found")
+        val runtimeRow = RuntimesTable.selectAll()
+            .where { (RuntimesTable.id eq id) and (RuntimesTable.workspaceId eq workspaceId) }
+            .forUpdate()
+            .singleOrNull()
+            ?: throw WorkspacePlacementAdmissionException("runtime not found")
+        val runtime = runtimeRow.toRuntime()
+
+        if (!runtime.matchesWorkspacePlacement(workspace)) {
+            throw WorkspacePlacementAdmissionException("runtime workspace placement changed or is unverified")
+        }
+        RuntimesTable.update({
+            (RuntimesTable.id eq id) and
+                (RuntimesTable.workspaceId eq workspaceId) and
+                (RuntimesTable.status eq RuntimeStatus.STOPPED.name)
+        }) { stmt ->
+            stmt[RuntimesTable.status] = RuntimeStatus.STARTING.name
+            stmt[RuntimesTable.updatedAt] = nowUtc()
+        } == 1
+    }
+
     fun findById(id: String): Runtime? = transaction {
         RuntimesTable.selectAll().where { RuntimesTable.id eq id }
             .singleOrNull()
