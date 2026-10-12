@@ -8,6 +8,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlinx.coroutines.runBlocking
 import net.kigawa.exkes.api.runtime.InvalidRuntimeRequestException
+import net.kigawa.exkes.api.runtime.RuntimeConflictException
 import net.kigawa.exkes.api.runtime.RuntimeNotAdmittingException
 import net.kigawa.exkes.api.runtime.RuntimeService
 import net.kigawa.exkes.common.config.DatabaseConfig
@@ -36,6 +37,7 @@ class RuntimeServiceTest {
     private lateinit var service: RuntimeService
     private lateinit var workspaceId: String
     private val templateId = "tpl-service-test"
+    private val verifiedNamespace = "platform-exkes-stg-sandbox"
     private val freshness = 15L
     private var now: Instant = Instant.now()
 
@@ -64,6 +66,9 @@ class RuntimeServiceTest {
             labelsJson = null,
         )
         val ws = workspaces.create("ws-${System.nanoTime()}", "sc", 1024L, emptyMap())
+        assertEquals(true, workspaces.reservePlacementForCreating(ws.id, verifiedNamespace))
+        assertEquals(true, workspaces.setPvcName(ws.id, "ws-${ws.id}"))
+        assertEquals(true, workspaces.recordVerifiedPvcUid(ws.id, verifiedNamespace, "uid-${ws.id}"))
         workspaces.transition(ws.id, WorkspaceStatus.CREATING, WorkspaceStatus.READY)
         workspaceId = ws.id
         service = RuntimeService(
@@ -95,6 +100,29 @@ class RuntimeServiceTest {
 
     /** Simulates the controller observing Ready=False: admission closes at once. */
     private fun observeNotReady(id: String) = assertEquals(true, runtimes.clearReadyObservation(id))
+
+    @Test
+    fun `runtime create rejects READY legacy Workspace without verified PVC`() {
+        val legacy = workspaces.create("legacy-${System.nanoTime()}", "sc", 1024L, emptyMap())
+        assertEquals(true, workspaces.transition(legacy.id, WorkspaceStatus.CREATING, WorkspaceStatus.READY))
+        assertFailsWith<RuntimeConflictException> {
+            runBlocking { service.createRuntime(legacy.id, templateId, null, null, null, emptyMap()) }
+        }
+    }
+
+    @Test
+    fun `restart rejects a Workspace deleted after Runtime creation`() {
+        val rt = runtimes.create(workspaceId, templateId, null, null, null, null)
+        assertEquals(true, runtimes.transition(rt.id, RuntimeStatus.CREATING, RuntimeStatus.STARTING))
+        assertEquals(true, runtimes.transition(rt.id, RuntimeStatus.STARTING, RuntimeStatus.RUNNING))
+        assertEquals(true, runtimes.transition(rt.id, RuntimeStatus.RUNNING, RuntimeStatus.STOPPING))
+        assertEquals(true, runtimes.transition(rt.id, RuntimeStatus.STOPPING, RuntimeStatus.STOPPED))
+        assertEquals(true, workspaces.transition(workspaceId, WorkspaceStatus.READY, WorkspaceStatus.DELETING))
+        assertFailsWith<RuntimeConflictException> {
+            runBlocking { service.startRuntime(workspaceId, rt.id) }
+        }
+        assertEquals(RuntimeStatus.STOPPED, runtimes.findById(rt.id)!!.status)
+    }
 
     @Test
     fun `runtime creation refuses client-controlled identity labels`() {
