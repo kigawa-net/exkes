@@ -94,6 +94,9 @@ class RuntimeService(
         labels: Map<String, String>?,
         idempotencyKey: String? = null,
     ): IdempotentResult<Runtime> = onIoThread {
+        // Managed Pod identity labels are reserved; accepting them would let callers
+        // forge labels used when the controller adopts existing Runtime Pods.
+        validateRuntimeLabels(labels ?: emptyMap())
         val createFresh = {
             // Validate workspace exists and is attachable
             val workspace = workspaceRepository.findById(workspaceId)
@@ -362,6 +365,16 @@ class RuntimeService(
             throw ExecutionNotFoundException(id)
         }
         return execution
+    }
+
+    /** Client-supplied Runtime labels must never redefine controller-owned identity. */
+    private fun validateRuntimeLabels(labels: Map<String, String>) {
+        validateLabels(labels)
+        labels.keys.forEach { key ->
+            if (key == "app.kubernetes.io/managed-by" || key.startsWith("exkes.") || key.startsWith("exkes/")) {
+                throw InvalidRuntimeRequestException("reserved runtime label key: $key")
+            }
+        }
     }
 
     /** Execution labels: key `[A-Za-z0-9][A-Za-z0-9._/-]{0,62}`, value up to 256 chars, at most 32 entries. */
