@@ -16,6 +16,7 @@ import net.kigawa.exkes.common.db.WorkspaceRepository
 import net.kigawa.exkes.common.db.connectDatabase
 import net.kigawa.exkes.common.db.createDataSource
 import net.kigawa.exkes.common.db.runMigrations
+import net.kigawa.exkes.common.domain.RuntimeStatus
 import net.kigawa.exkes.common.domain.Workspace
 import net.kigawa.exkes.common.domain.WorkspaceStatus
 import net.kigawa.exkes.common.domain.WorkspacePlacementState
@@ -248,6 +249,24 @@ class WorkspaceReconcilerTest {
         assertEquals(WorkspaceStatus.DELETING, repository.findById(workspace.id)!!.status)
         assertTrue(provisioner.deleteRequestedNames.isEmpty())
         assertTrue(runtimes.hasRuntimeHistory(workspace.id))
+    }
+
+    @Test
+    fun `DELETED Runtime tombstone is not a writer termination receipt`() {
+        val workspace = createWorkspace("old-runtime-${System.nanoTime()}")
+        val runtime = runtimes.create(workspace.id, "runtime-template", null, null, null, null)
+        assertTrue(runtimes.transition(runtime.id, RuntimeStatus.CREATING, RuntimeStatus.DELETING))
+        assertTrue(runtimes.transition(runtime.id, RuntimeStatus.DELETING, RuntimeStatus.DELETED))
+        // Public list hides DELETED rows, but they must still block cleanup.
+        assertEquals(0L, runtimes.list(workspace.id, null, 10, 0).total)
+        assertTrue(runtimes.hasRuntimeHistory(workspace.id))
+        assertTrue(repository.transition(workspace.id, WorkspaceStatus.CREATING, WorkspaceStatus.DELETING))
+
+        val provisioner = FakeProvisioner()
+        repeat(2) { newReconciler(provisioner).reconcileOnce() }
+
+        assertEquals(WorkspaceStatus.DELETING, repository.findById(workspace.id)!!.status)
+        assertTrue(provisioner.deleteRequestedNames.isEmpty())
     }
 
     @Test
