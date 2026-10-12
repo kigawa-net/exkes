@@ -17,6 +17,7 @@ import net.kigawa.exkes.common.db.createDataSource
 import net.kigawa.exkes.common.db.runMigrations
 import net.kigawa.exkes.common.domain.Workspace
 import net.kigawa.exkes.common.domain.WorkspaceStatus
+import net.kigawa.exkes.common.domain.WorkspacePlacementState
 import net.kigawa.exkes.controller.workspace.PvcState
 import net.kigawa.exkes.controller.workspace.ProvisionOutcome
 import net.kigawa.exkes.controller.workspace.WorkspaceProvisioner
@@ -111,6 +112,63 @@ class WorkspaceReconcilerTest {
         creatingTimeoutSeconds = creatingTimeoutSeconds,
         clock = clock,
     )
+
+    @Test
+    fun `new workspace records namespace and PVC UID before it becomes READY`() {
+        val workspace = createWorkspace("placement-${System.nanoTime()}")
+        var calls = 0
+        val provisioner = object : WorkspaceProvisioner {
+            override fun ensurePvc(workspace: Workspace): ProvisionOutcome {
+                calls++
+                assertEquals("platform-exkes-stg-sandbox", workspace.pvcNamespace)
+                return ProvisionOutcome(
+                    workspace.resolvePvcName(),
+                    if (calls == 1) PvcState.PENDING else PvcState.BOUND,
+                    pvcUid = "verified-pvc-uid",
+                    createdByThisAttempt = calls == 1,
+                )
+            }
+
+            override fun deletePvc(workspace: Workspace): Boolean = error("not used")
+        }
+        val reconciler = WorkspaceReconciler(
+            repository = repository,
+            provisioner = provisioner,
+            resourceNamespace = "platform-exkes-stg-sandbox",
+            creatingTimeoutSeconds = 0,
+        )
+        reconciler.reconcileOnce()
+        val reserved = repository.findById(workspace.id)!!
+        assertEquals(WorkspaceStatus.CREATING, reserved.status)
+        assertEquals(WorkspacePlacementState.VERIFIED, reserved.placementState)
+        assertEquals("platform-exkes-stg-sandbox", reserved.pvcNamespace)
+        assertEquals("verified-pvc-uid", reserved.pvcUid)
+        reconciler.reconcileOnce()
+        assertEquals(WorkspaceStatus.READY, repository.findById(workspace.id)!!.status)
+    }
+
+    @Test
+    fun `PVC cannot mark a new workspace READY without trusted UID evidence`() {
+        val workspace = createWorkspace("untrusted-${System.nanoTime()}")
+        val provisioner = object : WorkspaceProvisioner {
+            override fun ensurePvc(workspace: Workspace): ProvisionOutcome =
+                ProvisionOutcome(workspace.resolvePvcName(), PvcState.BOUND, pvcUid = "untrusted", createdByThisAttempt = false)
+            override fun deletePvc(workspace: Workspace): Boolean = error("not used")
+        }
+        val reconciler = WorkspaceReconciler(
+            repository = repository,
+            provisioner = provisioner,
+            resourceNamespace = "platform-exkes-stg-sandbox",
+            maxAttempts = 3,
+            creatingTimeoutSeconds = 0,
+        )
+        reconciler.reconcileOnce()
+        assertEquals(WorkspaceStatus.CREATING, repository.findById(workspace.id)!!.status)
+        assertEquals(WorkspacePlacementState.RESERVED, repository.findById(workspace.id)!!.placementState)
+        reconciler.reconcileOnce()
+        reconciler.reconcileOnce()
+        assertEquals(WorkspaceStatus.ERROR, repository.findById(workspace.id)!!.status)
+    }
 
     @Test
     fun `creating workspace becomes ready when pvc is bound`() {
