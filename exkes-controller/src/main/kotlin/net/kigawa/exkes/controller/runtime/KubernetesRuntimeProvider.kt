@@ -165,12 +165,12 @@ class KubernetesRuntimeProvider(
         val pvc = try {
             api.readNamespacedPersistentVolumeClaim(name, namespace).execute()
         } catch (e: ApiException) {
-            throw KubernetesRuntimeException("failed to verify live PVC for runtime ${runtime.id}: ${e.code}", e)
+            throw RuntimePvcUnverifiedException("failed to read live PVC for runtime ${runtime.id} (HTTP ${e.code})", e)
         }
         try {
             verifyRuntimeLivePvc(runtime, workspace, pvc, namespace)
         } catch (e: IllegalArgumentException) {
-            throw KubernetesRuntimeException("unverified live PVC for runtime ${runtime.id}: ${e.message}", e)
+            throw RuntimePvcUnverifiedException("unverified live PVC for runtime ${runtime.id}: ${e.message}", e)
         }
     }
 
