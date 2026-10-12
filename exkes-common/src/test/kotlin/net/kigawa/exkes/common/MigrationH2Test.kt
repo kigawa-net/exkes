@@ -33,8 +33,22 @@ class MigrationH2Test {
 
     @Test
     fun `flyway applies all migrations on h2`() = withMigratedDatabase { _, result ->
-        assertEquals(7, result.migrationsExecuted)
+        assertEquals(8, result.migrationsExecuted)
     }
+
+    @Test
+    fun `V8 creates unresolved-only immutable writer observations`() =
+        withMigratedDatabase { ds, _ ->
+            ds.connection.use { conn ->
+                conn.createStatement().use { stmt ->
+                    stmt.executeQuery(
+                        "SELECT workspace_id, workspace_placement_generation, workspace_pvc_uid, " +
+                            "runtime_id, pod_uid, writer_generation, evidence_source, evidence_kind, " +
+                            "observation_status, evidence_digest FROM writer_termination_observations",
+                    ).use { rs -> assertTrue(!rs.next()) }
+                }
+            }
+        }
 
     @Test
     fun `V7 leaves legacy Runtime placement columns null rather than inventing a UID`() =
