@@ -15,6 +15,11 @@ object WorkspacesTable : Table("workspaces") {
     val storageClass = varchar("storage_class", 64)
     val storageSize = long("storage_size")
     val pvcName = varchar("pvc_name", 128).nullable()
+    // Additive migration V6: legacy rows remain UNBOUND until verified.
+    val pvcNamespace = varchar("pvc_namespace", 63).nullable()
+    val pvcUid = varchar("pvc_uid", 64).nullable()
+    val placementGeneration = long("placement_generation")
+    val placementState = varchar("placement_state", 32)
     val errorMessage = text("error_message").nullable()
     val labelsJson = text("labels_json").nullable()
     val archivedAt = timestamp("archived_at").nullable()
