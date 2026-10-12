@@ -139,6 +139,11 @@ class RuntimeReconciler(
                     attempts.remove(runtime.id)
                     logger.info("runtime {} is STARTING (Pod {})", runtime.id, podName)
                 }
+            } catch (e: RuntimePvcUnverifiedException) {
+                // Unknown live PVC identity is not a termination or safe retry
+                // proof. Hold the intent for operator/identity reconciliation.
+                attempts.remove(runtime.id)
+                logger.error("holding Runtime {} CREATING: live PVC cannot be verified", runtime.id, e)
             } catch (e: Exception) {
                 handleProvisioningFailure(runtime, RuntimeStatus.CREATING, e)
             }
@@ -190,6 +195,12 @@ class RuntimeReconciler(
                         }
                     }
                 }
+            } catch (e: RuntimePvcUnverifiedException) {
+                // An old Pod may still run. Never turn an identity verification
+                // failure into an apparent process-termination state.
+                attempts.remove(runtime.id)
+                clearReady(runtime)
+                logger.error("holding Runtime {} STARTING: live PVC cannot be verified", runtime.id, e)
             } catch (e: Exception) {
                 handleProvisioningFailure(runtime, RuntimeStatus.STARTING, e)
             }
