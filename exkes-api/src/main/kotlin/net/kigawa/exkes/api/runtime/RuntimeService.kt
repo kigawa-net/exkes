@@ -102,7 +102,7 @@ class RuntimeService(
             val workspace = workspaceRepository.findById(workspaceId)
                 ?: throw RuntimeNotFoundException("workspace not found: $workspaceId")
             if (!workspace.canAttachRuntime()) {
-                throw InvalidRuntimeRequestException("workspace ${workspaceId} is not attachable (status=${workspace.status})")
+                throw RuntimeConflictException("workspace ${workspaceId} placement is not verified")
             }
 
             // Validate template exists
@@ -181,6 +181,8 @@ class RuntimeService(
                 runtime.status == RuntimeStatus.RUNNING -> return@onIoThread runtime
                 !runtime.canTransitionTo(RuntimeStatus.STARTING) ->
                     throw InvalidRuntimeRequestException("runtime in ${runtime.status} cannot be started")
+                workspaceRepository.findById(runtime.workspaceId)?.canAttachRuntime() != true ->
+                    throw RuntimeConflictException("workspace placement not verified for runtime $id")
                 runtimeRepository.transition(id, runtime.status, RuntimeStatus.STARTING) ->
                     return@onIoThread runtime.copy(status = RuntimeStatus.STARTING)
             }

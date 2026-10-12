@@ -34,6 +34,7 @@ class RuntimeReconcilerTest {
     private lateinit var workspaces: WorkspaceRepository
     private lateinit var workspaceId: String
     private val templateId = "tpl-test"
+    private val verifiedNamespace = "platform-exkes-stg-sandbox"
     private var now: Instant = Instant.now()
 
     /** Models the set of Pods that exist; stop/delete remove the Pod immediately. */
@@ -97,15 +98,41 @@ class RuntimeReconcilerTest {
         workspaces = WorkspaceRepository()
         RuntimeTemplateRepository().create(templateId, "t", null, "img", null, null, null, null)
         val ws = workspaces.create("ws-${System.nanoTime()}", "sc", 1024L, emptyMap())
+        assertTrue(workspaces.reservePlacementForCreating(ws.id, verifiedNamespace))
+        assertTrue(workspaces.setPvcName(ws.id, "ws-${ws.id}"))
+        assertTrue(workspaces.recordVerifiedPvcUid(ws.id, verifiedNamespace, "uid-${ws.id}"))
         workspaces.transition(ws.id, WorkspaceStatus.CREATING, WorkspaceStatus.READY)
         workspaceId = ws.id
-        reconciler = RuntimeReconciler(runtimes, workspaces, provisioner, maxAttempts = 2, clock = { now })
+        reconciler = RuntimeReconciler(runtimes, workspaces, provisioner, resourceNamespace = verifiedNamespace, maxAttempts = 2, clock = { now })
     }
 
     private fun newRuntime(ttl: Long? = null): Runtime =
         runtimes.create(workspaceId, templateId, null, null, ttl, null)
 
     private fun status(id: String) = runtimes.findById(id)!!.status
+
+    @Test
+    fun `legacy READY Workspace without PVC identity does not create a Runtime Pod`() {
+        val legacy = workspaces.create("legacy-${System.nanoTime()}", "sc", 1024L, emptyMap())
+        assertTrue(workspaces.transition(legacy.id, WorkspaceStatus.CREATING, WorkspaceStatus.READY))
+        val runtime = runtimes.create(legacy.id, templateId, null, null, null, null)
+        reconciler.reconcileOnce()
+        assertEquals(RuntimeStatus.FAILED, status(runtime.id))
+        assertTrue(provisioner.createCalls.isEmpty())
+    }
+
+    @Test
+    fun `Workspace verified in another Namespace does not create a Runtime Pod`() {
+        val foreign = workspaces.create("foreign-${System.nanoTime()}", "sc", 1024L, emptyMap())
+        assertTrue(workspaces.reservePlacementForCreating(foreign.id, "platform-exkes-main-sandbox"))
+        assertTrue(workspaces.setPvcName(foreign.id, "ws-${foreign.id}"))
+        assertTrue(workspaces.recordVerifiedPvcUid(foreign.id, "platform-exkes-main-sandbox", "uid-${foreign.id}"))
+        assertTrue(workspaces.transition(foreign.id, WorkspaceStatus.CREATING, WorkspaceStatus.READY))
+        val runtime = runtimes.create(foreign.id, templateId, null, null, null, null)
+        reconciler.reconcileOnce()
+        assertEquals(RuntimeStatus.FAILED, status(runtime.id))
+        assertTrue(provisioner.createCalls.isEmpty())
+    }
 
     @Test
     fun `creating runtime gets a pod and walks to running`() {
@@ -233,7 +260,7 @@ class RuntimeReconcilerTest {
         val rt = newRuntime()
         reconciler.reconcileOnce()
         assertEquals(RuntimeStatus.STARTING, status(rt.id))
-        val restarted = RuntimeReconciler(runtimes, workspaces, provisioner, clock = { now })
+        val restarted = RuntimeReconciler(runtimes, workspaces, provisioner, resourceNamespace = verifiedNamespace, clock = { now })
         restarted.reconcileOnce()
         assertEquals(RuntimeStatus.RUNNING, status(rt.id))
         runtimes.transition(rt.id, RuntimeStatus.RUNNING, RuntimeStatus.DELETING)
@@ -317,7 +344,7 @@ class RuntimeReconcilerTest {
         assertNull(runtimes.findById(rt.id)!!.lastReadyObservedAt)
 
         // Restart: the in-memory NotReady timer is gone, the DB keeps admission closed.
-        val restarted = RuntimeReconciler(runtimes, workspaces, provisioner, maxAttempts = 2, clock = { now })
+        val restarted = RuntimeReconciler(runtimes, workspaces, provisioner, resourceNamespace = verifiedNamespace, maxAttempts = 2, clock = { now })
         now = now.plusSeconds(10)
         restarted.reconcileOnce()
         assertNull(runtimes.findById(rt.id)!!.lastReadyObservedAt)
@@ -438,7 +465,7 @@ class RuntimeReconcilerTest {
         // The second controller completes the whole restart while this one is between
         // its snapshot and its own Pod creation. This controller must not create a second
         // Pod, must not fail the runtime, and its STARTING -> RUNNING write must be a no-op.
-        val other = RuntimeReconciler(runtimes, workspaces, provisioner, clock = { now })
+        val other = RuntimeReconciler(runtimes, workspaces, provisioner, resourceNamespace = verifiedNamespace, clock = { now })
         provisioner.beforeStart = { other.reconcileOnce() }
         reconciler.reconcileOnce()
         assertEquals(RuntimeStatus.RUNNING, status(rt.id))

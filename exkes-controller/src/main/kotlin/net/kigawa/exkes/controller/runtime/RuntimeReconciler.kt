@@ -10,7 +10,6 @@ import net.kigawa.exkes.common.db.RuntimeRepository
 import net.kigawa.exkes.common.db.WorkspaceRepository
 import net.kigawa.exkes.common.domain.Runtime
 import net.kigawa.exkes.common.domain.RuntimeStatus
-import net.kigawa.exkes.common.domain.WorkspaceStatus
 import org.slf4j.LoggerFactory
 
 /**
@@ -41,6 +40,7 @@ class RuntimeReconciler(
     private val runtimeRepository: RuntimeRepository,
     private val workspaceRepository: WorkspaceRepository,
     private val provisioner: RuntimeProvisioner,
+    private val resourceNamespace: String,
     private val intervalSeconds: Long = DEFAULT_INTERVAL_SECONDS,
     private val maxAttempts: Int = DEFAULT_MAX_ATTEMPTS,
     private val notReadyGraceSeconds: Long = DEFAULT_NOT_READY_GRACE_SECONDS,
@@ -122,7 +122,7 @@ class RuntimeReconciler(
         for (runtime in runtimes) {
             // Verify workspace exists and is attachable
             val workspace = workspaceRepository.findById(runtime.workspaceId)
-            if (workspace == null || !workspace.status.canAttachRuntime()) {
+            if (workspace == null || !workspace.canAttachRuntime() || workspace.pvcNamespace != resourceNamespace) {
                 val message = "workspace ${runtime.workspaceId} not attachable (${workspace?.status})"
                 if (runtimeRepository.transition(runtime.id, RuntimeStatus.CREATING, RuntimeStatus.FAILED, message)) {
                     logger.error("runtime {} moved to FAILED: {}", runtime.id, message)
@@ -150,7 +150,7 @@ class RuntimeReconciler(
             // Restart (STOPPED -> STARTING) re-attaches the retained Workspace, so the
             // same attachability check as CREATING applies.
             val workspace = workspaceRepository.findById(runtime.workspaceId)
-            if (workspace == null || !workspace.status.canAttachRuntime()) {
+            if (workspace == null || !workspace.canAttachRuntime() || workspace.pvcNamespace != resourceNamespace) {
                 val message = "workspace ${runtime.workspaceId} not attachable (${workspace?.status})"
                 if (runtimeRepository.transition(runtime.id, RuntimeStatus.STARTING, RuntimeStatus.FAILED, message)) {
                     attempts.remove(runtime.id)
@@ -408,5 +408,3 @@ class RuntimeReconciler(
     }
 }
 
-private fun WorkspaceStatus.canAttachRuntime(): Boolean =
-    this == WorkspaceStatus.READY || this == WorkspaceStatus.ARCHIVED
