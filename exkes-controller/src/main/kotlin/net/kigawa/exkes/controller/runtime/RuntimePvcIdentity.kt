@@ -5,6 +5,10 @@ import net.kigawa.exkes.common.domain.Runtime
 import net.kigawa.exkes.common.domain.Workspace
 import net.kigawa.exkes.controller.workspace.verifyPvcIdentity
 
+/** The live PVC could not be verified; do not infer a process has terminated. */
+internal class RuntimePvcUnverifiedException(message: String, cause: Throwable? = null) :
+    RuntimeException(message, cause)
+
 /**
  * A database Runtime/Workspace placement snapshot is not enough when the PVC
  * name has been reused. Require the *live* Kubernetes UID and Bound status.
