@@ -12,6 +12,7 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import net.kigawa.exkes.common.config.DatabaseConfig
 import net.kigawa.exkes.common.db.RuntimeRepository
+import net.kigawa.exkes.common.db.RuntimeTemplateRepository
 import net.kigawa.exkes.common.db.WorkspaceRepository
 import net.kigawa.exkes.common.db.connectDatabase
 import net.kigawa.exkes.common.db.createDataSource
@@ -91,6 +92,16 @@ class WorkspaceReconcilerTest {
         connectDatabase(dataSource)
         repository = WorkspaceRepository()
         runtimes = RuntimeRepository()
+        RuntimeTemplateRepository().create(
+            id = "runtime-template",
+            name = "Workspace Reconciler test Runtime",
+            description = null,
+            image = "example/runtime:test",
+            defaultResourcesJson = null,
+            defaultEnvJson = null,
+            defaultTtlSeconds = null,
+            labelsJson = null,
+        )
     }
 
     private fun createWorkspace(nameSuffix: String = System.nanoTime().toString()): Workspace =
