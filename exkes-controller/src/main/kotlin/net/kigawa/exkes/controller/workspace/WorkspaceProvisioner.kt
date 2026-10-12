@@ -12,6 +12,10 @@ enum class PvcState {
 data class ProvisionOutcome(
     val pvcName: String,
     val state: PvcState,
+    /** Kubernetes object UID, never a caller-provided identifier. */
+    val pvcUid: String? = null,
+    /** True only for a successful Kubernetes create response, never a 409/GET. */
+    val createdByThisAttempt: Boolean = false,
 )
 
 /**
