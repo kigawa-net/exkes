@@ -14,16 +14,45 @@ import io.ktor.server.config.ApplicationConfig
  * Readable via `EXKES_KUBERNETES_*` environment variables (plan chapter 4).
  */
 data class KubernetesConfig(
-    val namespace: String,
+    /** Namespace hosting the controller ServiceAccount and control-plane Deployments. */
+    val controlNamespace: String,
+    /** Namespace containing BOTH Workspace PVCs and Runtime Pods. */
+    val resourceNamespace: String,
     val useInCluster: Boolean,
     val kubeConfigPath: String,
 ) {
     companion object {
-        fun fromConfig(config: ApplicationConfig): KubernetesConfig = KubernetesConfig(
-            namespace = config.property("exkes.kubernetes.namespace").getString(),
-            useInCluster = config.property("exkes.kubernetes.useInCluster").getString().toBoolean(),
-            kubeConfigPath = config.property("exkes.kubernetes.kubeConfigPath").getString(),
-        )
+        private val NAMESPACE_PATTERN = Regex("[a-z0-9]([-a-z0-9]*[a-z0-9])?")
+
+        fun fromConfig(config: ApplicationConfig): KubernetesConfig {
+            // Compatibility for the first rollout: old platform manifests only set
+            // EXKES_KUBERNETES_NAMESPACE. They continue to target the same namespace
+            // until BOTH explicit values are supplied by the platform rollout.
+            val legacy = config.propertyOrNull("exkes.kubernetes.namespace")?.getString()
+            val control = config.propertyOrNull("exkes.kubernetes.controlNamespace")?.getString()
+            val resource = config.propertyOrNull("exkes.kubernetes.resourceNamespace")?.getString()
+            require((control == null) == (resource == null)) {
+                "controlNamespace and resourceNamespace must be configured together"
+            }
+            val controlNamespace = (control ?: legacy).orEmpty().trim()
+            val resourceNamespace = (resource ?: legacy).orEmpty().trim()
+            for (namespace in listOf(controlNamespace, resourceNamespace)) {
+                require(namespace.length in 1..63 && NAMESPACE_PATTERN.matches(namespace)) {
+                    "invalid Kubernetes namespace: $namespace"
+                }
+            }
+            if (control != null) {
+                require(controlNamespace != resourceNamespace) {
+                    "controlNamespace and resourceNamespace must be different in sandbox mode"
+                }
+            }
+            return KubernetesConfig(
+                controlNamespace = controlNamespace,
+                resourceNamespace = resourceNamespace,
+                useInCluster = config.property("exkes.kubernetes.useInCluster").getString().toBoolean(),
+                kubeConfigPath = config.property("exkes.kubernetes.kubeConfigPath").getString(),
+            )
+        }
     }
 }
 
