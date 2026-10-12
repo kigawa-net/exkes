@@ -15,6 +15,7 @@ import net.kigawa.exkes.common.db.connectDatabase
 import net.kigawa.exkes.common.db.createDataSource
 import net.kigawa.exkes.common.db.isDuplicateWorkspaceKeyViolation
 import net.kigawa.exkes.common.db.runMigrations
+import net.kigawa.exkes.common.domain.WorkspacePlacementState
 import net.kigawa.exkes.common.domain.WorkspaceStatus
 
 /**
@@ -131,6 +132,50 @@ class WorkspaceRepositoryTest {
         val reloaded = repository.findById(workspace.id)
         assertEquals(workspace.name, reloaded?.name)
         assertEquals(workspace.id, reloaded?.id)
+    }
+
+    @Test
+    fun `legacy placement remains unbound instead of inheriting current namespace`() {
+        val workspace = create("legacy-${System.nanoTime()}")
+        val reloaded = repository.findById(workspace.id)!!
+        assertEquals(WorkspacePlacementState.UNBOUND, reloaded.placementState)
+        assertEquals(null, reloaded.pvcNamespace)
+        assertEquals(null, reloaded.pvcUid)
+        assertEquals(0L, reloaded.placementGeneration)
+    }
+
+    @Test
+    fun `placement reservation is single winner and never rewrites its namespace`() {
+        val workspace = create("placement-${System.nanoTime()}")
+        assertTrue(repository.reservePlacementForCreating(workspace.id, "platform-exkes-stg"))
+        assertFalse(repository.reservePlacementForCreating(workspace.id, "platform-exkes-stg-sandbox"))
+        val bound = repository.findById(workspace.id)!!
+        assertEquals("platform-exkes-stg", bound.pvcNamespace)
+        assertEquals(WorkspacePlacementState.RESERVED, bound.placementState)
+        assertEquals(1L, bound.placementGeneration)
+    }
+
+    @Test
+    fun `verified PVC uid is bound once with namespace and recorded name`() {
+        val workspace = create("pvc-identity-${System.nanoTime()}")
+        assertTrue(repository.reservePlacementForCreating(workspace.id, "platform-exkes-stg-sandbox"))
+        assertFalse(repository.recordVerifiedPvcUid(workspace.id, "platform-exkes-stg-sandbox", "uid-1"))
+        assertTrue(repository.setPvcName(workspace.id, "ws-${workspace.id}"))
+        assertFalse(repository.recordVerifiedPvcUid(workspace.id, "platform-exkes-stg", "uid-1"))
+        assertTrue(repository.recordVerifiedPvcUid(workspace.id, "platform-exkes-stg-sandbox", "uid-1"))
+        assertFalse(repository.recordVerifiedPvcUid(workspace.id, "platform-exkes-stg-sandbox", "uid-2"))
+        val reloaded = repository.findById(workspace.id)!!
+        assertEquals("uid-1", reloaded.pvcUid)
+        assertEquals(2L, reloaded.placementGeneration)
+        assertEquals(WorkspacePlacementState.VERIFIED, reloaded.placementState)
+    }
+
+    @Test
+    fun `ready legacy workspace cannot be silently rebound`() {
+        val workspace = create("ready-legacy-${System.nanoTime()}")
+        assertTrue(repository.transition(workspace.id, WorkspaceStatus.CREATING, WorkspaceStatus.READY))
+        assertFalse(repository.reservePlacementForCreating(workspace.id, "platform-exkes-stg-sandbox"))
+        assertEquals(WorkspacePlacementState.UNBOUND, repository.findById(workspace.id)!!.placementState)
     }
 
     /** Conditional UPDATE: a replayed transition must not match any row. */
