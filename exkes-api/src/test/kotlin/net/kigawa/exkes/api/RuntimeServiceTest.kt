@@ -115,6 +115,35 @@ class RuntimeServiceTest {
     }
 
     @Test
+    fun `stopped Runtime restarts only with its original verified Workspace identity`() {
+        val runtime = runBlocking {
+            service.createRuntime(workspaceId, templateId, null, null, null, emptyMap())
+        }.value
+        assertEquals(true, runtimes.transition(runtime.id, RuntimeStatus.CREATING, RuntimeStatus.STARTING))
+        assertEquals(true, runtimes.transition(runtime.id, RuntimeStatus.STARTING, RuntimeStatus.RUNNING))
+        assertEquals(true, runtimes.transition(runtime.id, RuntimeStatus.RUNNING, RuntimeStatus.STOPPING))
+        assertEquals(true, runtimes.transition(runtime.id, RuntimeStatus.STOPPING, RuntimeStatus.STOPPED))
+        val started = runBlocking { service.startRuntime(workspaceId, runtime.id) }
+        assertEquals(RuntimeStatus.STARTING, started.status)
+        assertEquals(RuntimeStatus.STARTING, runtimes.findById(runtime.id)!!.status)
+        assertEquals(runtime.workspacePvcUid, started.workspacePvcUid)
+        assertEquals(runtime.workspacePlacementGeneration, started.workspacePlacementGeneration)
+    }
+
+    @Test
+    fun `legacy stopped Runtime cannot restart even on verified Workspace`() {
+        val runtime = runtimes.create(workspaceId, templateId, null, null, null, null)
+        assertEquals(true, runtimes.transition(runtime.id, RuntimeStatus.CREATING, RuntimeStatus.STARTING))
+        assertEquals(true, runtimes.transition(runtime.id, RuntimeStatus.STARTING, RuntimeStatus.RUNNING))
+        assertEquals(true, runtimes.transition(runtime.id, RuntimeStatus.RUNNING, RuntimeStatus.STOPPING))
+        assertEquals(true, runtimes.transition(runtime.id, RuntimeStatus.STOPPING, RuntimeStatus.STOPPED))
+        assertFailsWith<RuntimeConflictException> {
+            runBlocking { service.startRuntime(workspaceId, runtime.id) }
+        }
+        assertEquals(RuntimeStatus.STOPPED, runtimes.findById(runtime.id)!!.status)
+    }
+
+    @Test
     fun `Runtime cannot be admitted after Workspace delete intent`() {
         assertEquals(true, workspaces.transition(workspaceId, WorkspaceStatus.READY, WorkspaceStatus.DELETING))
         assertFailsWith<RuntimeConflictException> {

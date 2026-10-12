@@ -186,9 +186,7 @@ class RuntimeService(
                 runtime.status == RuntimeStatus.RUNNING -> return@onIoThread runtime
                 !runtime.canTransitionTo(RuntimeStatus.STARTING) ->
                     throw InvalidRuntimeRequestException("runtime in ${runtime.status} cannot be started")
-                workspaceRepository.findById(runtime.workspaceId)?.canAttachRuntime() != true ->
-                    throw RuntimeConflictException("workspace placement not verified for runtime $id")
-                runtimeRepository.transition(id, runtime.status, RuntimeStatus.STARTING) ->
+                startBoundOrConflict(id, workspaceId) ->
                     return@onIoThread runtime.copy(status = RuntimeStatus.STARTING)
             }
         }
@@ -405,6 +403,14 @@ class RuntimeService(
             }
         }
     }
+
+    /** A failed placement lock/check is a conflict, never a 500 or silent restart. */
+    private fun startBoundOrConflict(id: String, workspaceId: String): Boolean =
+        try {
+            runtimeRepository.startBoundRuntime(id, workspaceId)
+        } catch (e: WorkspacePlacementAdmissionException) {
+            throw RuntimeConflictException("workspace placement changed for runtime $id")
+        }
 
     private fun getBlocking(workspaceId: String, id: String): Runtime {
         val runtime = runtimeRepository.findById(id)
