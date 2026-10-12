@@ -354,6 +354,17 @@ class RuntimeReconcilerTest {
     }
 
     @Test
+    fun `TTL cleanup is not prevented by an invalid Workspace placement`() {
+        val rt = newRuntime(ttl = 10)
+        runToRunning(rt)
+        assertTrue(workspaces.transition(workspaceId, WorkspaceStatus.READY, WorkspaceStatus.DELETING))
+        now = rt.createdAt.plusSeconds(11)
+        reconciler.reconcileOnce()
+        assertEquals(RuntimeStatus.EXPIRED, status(rt.id))
+        assertNull(runtimes.findById(rt.id)!!.lastReadyObservedAt)
+    }
+
+    @Test
     fun `degraded Runtime cannot recover with stale Workspace placement`() {
         val rt = newRuntime()
         runToRunning(rt)
