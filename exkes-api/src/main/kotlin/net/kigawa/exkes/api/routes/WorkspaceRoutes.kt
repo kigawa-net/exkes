@@ -28,12 +28,13 @@ fun Route.configureWorkspaceRoutes(service: WorkspaceService) {
     route("/v1/workspaces") {
         post {
             val request = receiveBody<CreateWorkspaceRequest>(call)
-            val workspace = service.create(
+            val result = service.create(
                 name = request.name,
                 storageSizeBytes = request.storageSizeBytes,
                 labels = request.labels,
+                idempotencyKey = idempotencyKeyOf(call),
             )
-            call.respond(HttpStatusCode.Accepted, workspace.toResponse())
+            respondCreated(call, result) { it.toResponse() }
         }
 
         get {
@@ -47,8 +48,10 @@ fun Route.configureWorkspaceRoutes(service: WorkspaceService) {
             }
             val limit = queryInt(call, "limit", 50)
             val offset = queryInt(call, "offset", 0)
+            // Exact name match (`?name=`); DELETED rows are never listed.
+            val name = call.request.queryParameters["name"]
 
-            val result = service.list(status, limit, offset)
+            val result = service.list(status, limit, offset, name)
             call.respond(
                 HttpStatusCode.OK,
                 WorkspaceListResponse(

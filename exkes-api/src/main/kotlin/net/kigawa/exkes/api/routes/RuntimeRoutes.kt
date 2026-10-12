@@ -27,15 +27,16 @@ fun Route.configureRuntimeRoutes(service: RuntimeService) {
         post {
             val workspaceId = call.parameters["workspaceId"] ?: throw InvalidWorkspaceRequestException("missing workspace id")
             val request = receiveBody<CreateRuntimeRequest>(call)
-            val runtime = service.createRuntime(
+            val result = service.createRuntime(
                 workspaceId = workspaceId,
                 templateId = request.templateId,
                 resourcesJson = request.resourcesJson,
                 envJson = request.envJson,
                 ttlSeconds = request.ttlSeconds,
                 labels = request.labels,
+                idempotencyKey = idempotencyKeyOf(call),
             )
-            call.respond(HttpStatusCode.Accepted, runtime.toResponse())
+            respondCreated(call, result) { it.toResponse() }
         }
 
         get {
@@ -105,13 +106,15 @@ fun Route.configureExecutionRoutes(service: RuntimeService) {
             } catch (e: IllegalArgumentException) {
                 throw InvalidWorkspaceRequestException("unknown execution type: ${request.type}")
             }
-            val execution = service.createExecution(
+            val result = service.createExecution(
                 runtimeId = runtimeId,
                 type = type,
                 commandJson = request.commandJson,
                 agentConfigJson = request.agentConfigJson,
+                labels = request.labels,
+                idempotencyKey = idempotencyKeyOf(call),
             )
-            call.respond(HttpStatusCode.Accepted, execution.toResponse())
+            respondCreated(call, result) { it.toResponse() }
         }
 
         get {
@@ -126,8 +129,9 @@ fun Route.configureExecutionRoutes(service: RuntimeService) {
             }
             val limit = queryInt(call, "limit", 50)
             val offset = queryInt(call, "offset", 0)
+            val labels = labelFilterOf(call)
 
-            val result = service.listExecutions(runtimeId, status, limit, offset)
+            val result = service.listExecutions(runtimeId, status, limit, offset, labels)
             call.respond(
                 HttpStatusCode.OK,
                 ExecutionListResponse(
@@ -144,6 +148,17 @@ fun Route.configureExecutionRoutes(service: RuntimeService) {
             val id = call.parameters["id"] ?: throw InvalidWorkspaceRequestException("missing execution id")
             call.respond(HttpStatusCode.OK, service.getExecution(runtimeId, id).toResponse())
         }
+
+        // Cancel records a request only (non-terminal -> CANCELLING). 202 when this call changed
+        // the state; 200 with the current execution when already CANCELLING or terminal.
+        // Stop is confirmed asynchronously: poll GET until status is CANCELLED.
+        post("/{id}/cancel") {
+            val runtimeId = call.parameters["runtimeId"] ?: throw InvalidWorkspaceRequestException("missing runtime id")
+            val id = call.parameters["id"] ?: throw InvalidWorkspaceRequestException("missing execution id")
+            val result = service.cancelExecution(runtimeId, id)
+            val status = if (result.accepted) HttpStatusCode.Accepted else HttpStatusCode.OK
+            call.respond(status, result.execution.toResponse())
+        }
     }
 }
 
@@ -158,6 +173,19 @@ private suspend inline fun <reified T : Any> receiveBody(call: ApplicationCall):
     throw InvalidWorkspaceRequestException("invalid request body: ${e.message}")
 } catch (e: BadRequestException) {
     throw InvalidWorkspaceRequestException("invalid request body: ${e.message}")
+}
+
+/** `?label=k=v` (repeatable, ANDed). Each key may appear once. */
+private fun labelFilterOf(call: ApplicationCall): Map<String, String> {
+    val labels = linkedMapOf<String, String>()
+    call.request.queryParameters.getAll("label")?.forEach { raw ->
+        val separator = raw.indexOf('=')
+        if (separator <= 0) throw InvalidWorkspaceRequestException("label filter must be k=v: $raw")
+        val key = raw.substring(0, separator)
+        if (labels.containsKey(key)) throw InvalidWorkspaceRequestException("duplicate label filter key: $key")
+        labels[key] = raw.substring(separator + 1)
+    }
+    return labels
 }
 
 private fun queryInt(call: ApplicationCall, name: String, default: Int): Int {

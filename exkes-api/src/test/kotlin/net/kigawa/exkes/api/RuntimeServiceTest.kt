@@ -87,7 +87,7 @@ class RuntimeServiceTest {
     }
 
     private fun submit(runtimeId: String) = runBlocking {
-        service.createExecution(runtimeId, ExecutionType.COMMAND, """{"command":"true"}""", null)
+        service.createExecution(runtimeId, ExecutionType.COMMAND, """{"command":"true"}""", null).value
     }
 
     /** Simulates the controller observing Ready=True at [now]. */

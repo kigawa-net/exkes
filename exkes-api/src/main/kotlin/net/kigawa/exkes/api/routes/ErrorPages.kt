@@ -9,11 +9,17 @@ import io.ktor.server.plugins.statuspages.StatusPages
 import io.ktor.server.response.respond
 import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.SerializationException
+import net.kigawa.exkes.api.runtime.ExecutionConflictException
+import net.kigawa.exkes.api.runtime.ExecutionNotFoundException
+import net.kigawa.exkes.api.runtime.InvalidRuntimeRequestException
+import net.kigawa.exkes.api.runtime.RuntimeConflictException
 import net.kigawa.exkes.api.runtime.RuntimeNotAdmittingException
+import net.kigawa.exkes.api.runtime.RuntimeNotFoundException
 import net.kigawa.exkes.api.workspace.InvalidWorkspaceRequestException
 import net.kigawa.exkes.api.workspace.WorkspaceConflictException
 import net.kigawa.exkes.api.workspace.WorkspaceNotFoundException
 import net.kigawa.exkes.common.db.DuplicateWorkspaceNameException
+import net.kigawa.exkes.common.db.IdempotencyKeyMismatchException
 import org.slf4j.LoggerFactory
 
 private val logger = LoggerFactory.getLogger("ErrorPages")
@@ -52,6 +58,31 @@ fun Application.installErrorPages() {
 
         exception<InvalidWorkspaceRequestException> { call, cause ->
             call.respondError(HttpStatusCode.BadRequest, "VALIDATION_ERROR", cause.message ?: "invalid request")
+        }
+
+        exception<InvalidRuntimeRequestException> { call, cause ->
+            call.respondError(HttpStatusCode.BadRequest, "VALIDATION_ERROR", cause.message ?: "invalid request")
+        }
+
+        exception<RuntimeNotFoundException> { call, cause ->
+            call.respondError(HttpStatusCode.NotFound, "NOT_FOUND", cause.message ?: "runtime not found")
+        }
+
+        exception<ExecutionNotFoundException> { call, cause ->
+            call.respondError(HttpStatusCode.NotFound, "NOT_FOUND", cause.message ?: "execution not found")
+        }
+
+        exception<RuntimeConflictException> { call, cause ->
+            call.respondError(HttpStatusCode.Conflict, "CONFLICT", cause.message ?: "conflict")
+        }
+
+        exception<ExecutionConflictException> { call, cause ->
+            call.respondError(HttpStatusCode.Conflict, "CONFLICT", cause.message ?: "conflict")
+        }
+
+        // Same Idempotency-Key, different request body: the key is bound to the first body.
+        exception<IdempotencyKeyMismatchException> { call, cause ->
+            call.respondError(HttpStatusCode.UnprocessableEntity, "VALIDATION_ERROR", cause.message ?: "idempotency key mismatch")
         }
 
         // Ktor raises these while decoding the request body / query.

@@ -77,10 +77,12 @@ open class WorkspaceRepository {
      * list and a subsequent GET would disagree. An explicit `status=DELETED`
      * filter therefore always returns an empty page.
      */
-    fun list(status: WorkspaceStatus?, limit: Int, offset: Int): WorkspaceListResult = transaction {
+    fun list(status: WorkspaceStatus?, limit: Int, offset: Int, name: String? = null): WorkspaceListResult = transaction {
         val rows = WorkspacesTable.selectAll().where {
             val filter = status?.let { WorkspacesTable.status eq it.name } ?: Op.TRUE
-            filter and (WorkspacesTable.status neq WorkspaceStatus.DELETED.name)
+            // Exact match on the unique name (at most one row).
+            val nameFilter = name?.let { WorkspacesTable.name eq it } ?: Op.TRUE
+            filter and nameFilter and (WorkspacesTable.status neq WorkspaceStatus.DELETED.name)
         }
         val total = rows.count()
         val items = rows

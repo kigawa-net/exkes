@@ -20,6 +20,8 @@ import net.kigawa.exkes.common.db.runMigrations
 import net.kigawa.exkes.common.domain.ExecutionStatus
 import net.kigawa.exkes.common.domain.ExecutionType
 import net.kigawa.exkes.common.domain.RuntimeStatus
+import net.kigawa.exkes.common.domain.TerminationEvidence
+import java.time.Instant
 
 class ExecutionRepositoryTest {
     private lateinit var dataSource: DataSource
@@ -181,5 +183,128 @@ class ExecutionRepositoryTest {
         assertEquals(ExecutionStatus.SUCCEEDED, reloaded.status)
         assertEquals(0, reloaded.exitCode)
         assertNotNull(reloaded.finishedAt)
+    }
+
+    private fun evidence() = TerminationEvidence(
+        observedBy = "runtime-agent:rt-1",
+        processIdentity = "container:abc123/pid:42",
+        observedAt = Instant.parse("2026-10-12T00:00:00Z"),
+    )
+
+    @Test
+    fun `cancel request moves non-terminal executions to CANCELLING, never CANCELLED`() {
+        for (from in listOf(ExecutionStatus.QUEUED, ExecutionStatus.STARTING, ExecutionStatus.RUNNING)) {
+            val execution = createExecution()
+            // Walk to `from`.
+            if (from != ExecutionStatus.QUEUED) {
+                assertTrue(repository.transition(execution.id, ExecutionStatus.QUEUED, ExecutionStatus.STARTING))
+            }
+            if (from == ExecutionStatus.RUNNING) {
+                assertTrue(repository.transition(execution.id, ExecutionStatus.STARTING, ExecutionStatus.RUNNING))
+            }
+
+            assertTrue(repository.transition(execution.id, from, ExecutionStatus.CANCELLING))
+            val reloaded = repository.findById(execution.id)!!
+            assertEquals(ExecutionStatus.CANCELLING, reloaded.status)
+            assertFalse(reloaded.isTerminal)
+            assertNotNull(reloaded.cancelRequestedAt)
+            assertNull(reloaded.finishedAt)
+            assertNull(reloaded.terminationEvidence)
+        }
+    }
+
+    @Test
+    fun `CANCELLED is unreachable without termination evidence`() {
+        // The state machine itself forbids a direct jump from any non-terminal state.
+        for (from in listOf(ExecutionStatus.QUEUED, ExecutionStatus.STARTING, ExecutionStatus.RUNNING)) {
+            assertFalse(ExecutionStatus.canTransition(from, ExecutionStatus.CANCELLED), "from $from")
+        }
+        val execution = createExecution()
+        assertFailsWith<IllegalArgumentException> {
+            repository.transition(execution.id, ExecutionStatus.QUEUED, ExecutionStatus.CANCELLED)
+        }
+        // Even a CANCELLING row cannot be moved to CANCELLED through the generic transition without evidence.
+        assertTrue(repository.transition(execution.id, ExecutionStatus.QUEUED, ExecutionStatus.CANCELLING))
+        assertFailsWith<IllegalArgumentException> {
+            repository.transition(execution.id, ExecutionStatus.CANCELLING, ExecutionStatus.CANCELLED)
+        }
+        assertEquals(ExecutionStatus.CANCELLING, repository.findById(execution.id)!!.status)
+    }
+
+    @Test
+    fun `confirmCancelled moves CANCELLING to CANCELLED and records evidence`() {
+        val execution = createExecution()
+        assertTrue(repository.transition(execution.id, ExecutionStatus.QUEUED, ExecutionStatus.STARTING))
+        assertTrue(repository.transition(execution.id, ExecutionStatus.STARTING, ExecutionStatus.RUNNING))
+        assertTrue(repository.transition(execution.id, ExecutionStatus.RUNNING, ExecutionStatus.CANCELLING))
+
+        assertTrue(repository.confirmCancelled(execution.id, evidence()))
+        val reloaded = repository.findById(execution.id)!!
+        assertEquals(ExecutionStatus.CANCELLED, reloaded.status)
+        assertTrue(reloaded.isTerminal)
+        assertNotNull(reloaded.finishedAt)
+        assertNotNull(reloaded.cancelRequestedAt)
+        assertEquals(evidence(), reloaded.terminationEvidence)
+    }
+
+    @Test
+    fun `confirmCancelled only applies to a CANCELLING row`() {
+        val execution = createExecution()
+        assertTrue(repository.transition(execution.id, ExecutionStatus.QUEUED, ExecutionStatus.STARTING))
+        assertTrue(repository.transition(execution.id, ExecutionStatus.STARTING, ExecutionStatus.RUNNING))
+
+        // Row is RUNNING (no cancel was requested): confirmation must not apply.
+        assertFalse(repository.confirmCancelled(execution.id, evidence()))
+        val reloaded = repository.findById(execution.id)!!
+        assertEquals(ExecutionStatus.RUNNING, reloaded.status)
+        assertNull(reloaded.terminationEvidence)
+        assertNull(reloaded.finishedAt)
+    }
+
+    @Test
+    fun `CANCELLING can still be overtaken by the process reporting RUNNING or SUCCEEDED`() {
+        // Process survives the cancel request: runtime-agent reports it running, then exiting.
+        val survived = createExecution()
+        assertTrue(repository.transition(survived.id, ExecutionStatus.QUEUED, ExecutionStatus.STARTING))
+        assertTrue(repository.transition(survived.id, ExecutionStatus.STARTING, ExecutionStatus.CANCELLING))
+        assertTrue(repository.transition(survived.id, ExecutionStatus.CANCELLING, ExecutionStatus.RUNNING))
+        assertEquals(ExecutionStatus.RUNNING, repository.findById(survived.id)!!.status)
+        assertNotNull(repository.findById(survived.id)!!.cancelRequestedAt)
+
+        val exited = createExecution()
+        assertTrue(repository.transition(exited.id, ExecutionStatus.QUEUED, ExecutionStatus.CANCELLING))
+        assertTrue(repository.transition(exited.id, ExecutionStatus.CANCELLING, ExecutionStatus.SUCCEEDED, exitCode = 0))
+        assertEquals(ExecutionStatus.SUCCEEDED, repository.findById(exited.id)!!.status)
+    }
+
+    @Test
+    fun `terminal executions stay terminal and cannot be cancelled or confirmed again`() {
+        val execution = createExecution()
+        assertTrue(repository.transition(execution.id, ExecutionStatus.QUEUED, ExecutionStatus.CANCELLING))
+        assertTrue(repository.confirmCancelled(execution.id, evidence()))
+
+        assertFailsWith<IllegalArgumentException> {
+            repository.transition(execution.id, ExecutionStatus.CANCELLED, ExecutionStatus.CANCELLING)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            repository.transition(execution.id, ExecutionStatus.CANCELLED, ExecutionStatus.RUNNING)
+        }
+        // A second confirmation matches no row (row is no longer CANCELLING).
+        assertFalse(repository.confirmCancelled(execution.id, evidence()))
+        assertEquals(ExecutionStatus.CANCELLED, repository.findById(execution.id)!!.status)
+    }
+
+    @Test
+    fun `CANCELLING appears in status filters as a non-terminal state`() {
+        val runtime = createRuntime()
+        val execution = createExecution(runtime = runtime)
+        assertTrue(repository.transition(execution.id, ExecutionStatus.QUEUED, ExecutionStatus.CANCELLING))
+
+        val cancelling = repository.list(runtimeId = runtime.id, status = ExecutionStatus.CANCELLING, limit = 10, offset = 0)
+        assertEquals(1, cancelling.total)
+        assertEquals(ExecutionStatus.CANCELLING, cancelling.items.single().status)
+
+        val cancelled = repository.list(runtimeId = runtime.id, status = ExecutionStatus.CANCELLED, limit = 10, offset = 0)
+        assertEquals(0, cancelled.total)
     }
 }

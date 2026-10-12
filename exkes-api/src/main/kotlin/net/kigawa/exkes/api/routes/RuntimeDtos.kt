@@ -46,6 +46,7 @@ data class CreateExecutionRequest(
     val type: String,  // COMMAND, AGENT, SYSTEM
     val commandJson: String? = null,
     val agentConfigJson: String? = null,
+    val labels: Map<String, String>? = null,
 )
 
 @Serializable
@@ -60,6 +61,7 @@ data class ExecutionResponse(
     val errorMessage: String?,
     val logObjectKey: String?,
     val artifactObjectKeysJson: String?,
+    val labels: Map<String, String>,
     @Serializable(with = InstantIsoSerializer::class)
     val createdAt: Instant,
     @Serializable(with = InstantIsoSerializer::class)
@@ -68,6 +70,9 @@ data class ExecutionResponse(
     val startedAt: Instant?,
     @Serializable(with = InstantIsoSerializer::class)
     val finishedAt: Instant?,
+    /** Set when a cancel was requested (status CANCELLING or a later state). A request, not a stop proof. */
+    @Serializable(with = InstantIsoSerializer::class)
+    val cancelRequestedAt: Instant?,
 )
 
 @Serializable
@@ -139,8 +144,10 @@ fun net.kigawa.exkes.common.domain.Execution.toResponse(): ExecutionResponse = E
     errorMessage = errorMessage,
     logObjectKey = logObjectKey,
     artifactObjectKeysJson = artifactObjectKeysJson,
+    labels = labels,
     createdAt = createdAt,
     updatedAt = updatedAt,
     startedAt = startedAt,
     finishedAt = finishedAt,
+    cancelRequestedAt = cancelRequestedAt,
 )
