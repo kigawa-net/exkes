@@ -8,6 +8,7 @@ import io.ktor.server.application.*
 import io.ktor.server.plugins.contentnegotiation.*
 import io.ktor.server.routing.*
 import io.ktor.server.testing.*
+import java.time.Instant
 import javax.sql.DataSource
 import kotlin.test.BeforeTest
 import kotlin.test.Test
@@ -92,13 +93,17 @@ class RuntimeRoutesTest {
 
     private fun idOf(body: String): String = Regex("\"id\":\"([^\"]+)\"").find(body)!!.groupValues[1]
 
-    /** Creates a READY workspace with one RUNNING runtime and returns (workspaceId, runtimeId). */
+    /**
+     * Creates a READY workspace with one RUNNING runtime that has a fresh Ready observation
+     * (the controller's side, simulated), and returns (workspaceId, runtimeId).
+     */
     private fun runningRuntime(): Pair<String, String> {
         val workspace = workspaces.create(uniqueName("rt-ws"), "rook-cephfs", 1024L, emptyMap())
         workspaces.transition(workspace.id, WorkspaceStatus.CREATING, WorkspaceStatus.READY)
         val runtime = runtimes.create(workspace.id, "route-template", null, null, null, null)
         runtimes.transition(runtime.id, RuntimeStatus.CREATING, RuntimeStatus.STARTING)
         runtimes.transition(runtime.id, RuntimeStatus.STARTING, RuntimeStatus.RUNNING)
+        assertTrue(runtimes.recordReadyObserved(runtime.id, Instant.now()))
         return workspace.id to runtime.id
     }
 
@@ -172,6 +177,40 @@ class RuntimeRoutesTest {
         assertTrue(listed.contains("\"total\":1"), listed)
         val none = client.get("$path?label=kivra.run-id=run-2").bodyAsText()
         assertTrue(none.contains("\"total\":0"), none)
+    }
+
+    @Test
+    fun `replay of an existing execution is answered while admission is closed and creates nothing new`() = testApplication {
+        application { testModule() }
+        val (_, runtimeId) = runningRuntime()
+        val path = "/v1/runtimes/$runtimeId/executions"
+        val body = """{"type":"SYSTEM"}"""
+        val key = "replay-closed-$runtimeId"
+
+        val first = client.postJson(path, body, key = key)
+        assertEquals(HttpStatusCode.Accepted, first.status)
+        // The controller reports Ready=False: admission is closed for new work.
+        assertTrue(runtimes.clearReadyObservation(runtimeId))
+
+        val replay = client.postJson(path, body, key = key)
+        assertEquals(HttpStatusCode.Accepted, replay.status)
+        assertEquals("true", replay.headers["Idempotent-Replayed"])
+        assertEquals(idOf(first.bodyAsText()), idOf(replay.bodyAsText()))
+        val listed = client.get(path).bodyAsText()
+        assertTrue(listed.contains("\"total\":1"), listed)
+    }
+
+    @Test
+    fun `new execution with a key is refused with 503 while admission is closed and nothing is stored`() = testApplication {
+        application { testModule() }
+        val (_, runtimeId) = runningRuntime()
+        val path = "/v1/runtimes/$runtimeId/executions"
+        assertTrue(runtimes.clearReadyObservation(runtimeId))
+
+        val refused = client.postJson(path, """{"type":"SYSTEM"}""", key = "fresh-closed-$runtimeId")
+        assertEquals(HttpStatusCode.ServiceUnavailable, refused.status)
+        val listed = client.get(path).bodyAsText()
+        assertTrue(listed.contains("\"total\":0"), listed)
     }
 
     @Test
