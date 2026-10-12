@@ -102,6 +102,28 @@ class RuntimeServiceTest {
     private fun observeNotReady(id: String) = assertEquals(true, runtimes.clearReadyObservation(id))
 
     @Test
+    fun `fresh Runtime snapshots verified Workspace UID and generation`() {
+        val result = runBlocking {
+            service.createRuntime(workspaceId, templateId, null, null, null, emptyMap())
+        }.value
+        val ws = workspaces.findById(workspaceId)!!
+        assertEquals(ws.placementGeneration, result.workspacePlacementGeneration)
+        assertEquals(ws.pvcUid, result.workspacePvcUid)
+        assertEquals(ws.pvcNamespace, result.workspacePvcNamespace)
+        assertEquals(ws.pvcName, result.workspacePvcName)
+        assertEquals(true, result.matchesWorkspacePlacement(ws))
+    }
+
+    @Test
+    fun `Runtime cannot be admitted after Workspace delete intent`() {
+        assertEquals(true, workspaces.transition(workspaceId, WorkspaceStatus.READY, WorkspaceStatus.DELETING))
+        assertFailsWith<RuntimeConflictException> {
+            runBlocking { service.createRuntime(workspaceId, templateId, null, null, null, emptyMap()) }
+        }
+        assertEquals(0L, runtimes.list(workspaceId, null, 10, 0).total)
+    }
+
+    @Test
     fun `runtime create rejects READY legacy Workspace without verified PVC`() {
         val legacy = workspaces.create("legacy-${System.nanoTime()}", "sc", 1024L, emptyMap())
         assertEquals(true, workspaces.transition(legacy.id, WorkspaceStatus.CREATING, WorkspaceStatus.READY))

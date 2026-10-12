@@ -5,6 +5,7 @@ import java.util.UUID
 import kotlinx.serialization.json.Json
 import net.kigawa.exkes.common.domain.Runtime
 import net.kigawa.exkes.common.domain.RuntimeStatus
+import net.kigawa.exkes.common.domain.Workspace
 import org.jetbrains.exposed.exceptions.ExposedSQLException
 import org.jetbrains.exposed.sql.Op
 import org.jetbrains.exposed.sql.SortOrder
@@ -13,6 +14,9 @@ import org.jetbrains.exposed.sql.insert
 import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.transactions.transaction
 import org.jetbrains.exposed.sql.update
+
+/** A Runtime cannot be bound to an unverified, migrating or deleted PVC. */
+class WorkspacePlacementAdmissionException(message: String) : RuntimeException(message)
 
 data class RuntimeListResult(
     val items: List<Runtime>,
@@ -56,6 +60,53 @@ open class RuntimeRepository {
             it[RuntimesTable.updatedAt] = now
         }
 
+        findByIdOrThrow(id)
+    }
+
+    /**
+     * Fresh Runtime admission serializes against Workspace DELETE/migration:
+     * SELECT FOR UPDATE holds the authoritative Workspace row until INSERT commits.
+     * No Kubernetes/network side effect occurs inside this transaction.
+     */
+    fun createBoundToWorkspace(
+        workspaceId: String,
+        templateId: String,
+        resourcesJson: String?,
+        envJson: String?,
+        ttlSeconds: Long?,
+        labelsJson: String?,
+    ): Runtime = transaction {
+        val locked = WorkspacesTable.selectAll()
+            .where { WorkspacesTable.id eq workspaceId }
+            .forUpdate()
+            .singleOrNull()
+            ?: throw WorkspacePlacementAdmissionException("workspace not found or placement unavailable")
+
+        // Nested Exposed transactions use the current database transaction.
+        // Read after acquiring FOR UPDATE, not from an earlier API snapshot.
+        val workspace = WorkspaceRepository().findById(workspaceId)
+            ?: throw WorkspacePlacementAdmissionException("workspace not found")
+        if (!workspace.canAttachRuntime() || workspace.pvcName != Workspace.pvcNameFor(workspace.id)) {
+            throw WorkspacePlacementAdmissionException("workspace placement is not verified")
+        }
+        val now = nowUtc()
+        val id = UUID.randomUUID().toString()
+        RuntimesTable.insert {
+            it[RuntimesTable.id] = id
+            it[RuntimesTable.workspaceId] = workspaceId
+            it[RuntimesTable.templateId] = templateId
+            it[RuntimesTable.status] = RuntimeStatus.CREATING.name
+            it[RuntimesTable.resourcesJson] = resourcesJson
+            it[RuntimesTable.envJson] = envJson
+            it[RuntimesTable.ttlSeconds] = ttlSeconds
+            it[RuntimesTable.labelsJson] = labelsJson
+            it[RuntimesTable.workspacePlacementGeneration] = workspace.placementGeneration
+            it[RuntimesTable.workspacePvcNamespace] = workspace.pvcNamespace
+            it[RuntimesTable.workspacePvcName] = workspace.pvcName
+            it[RuntimesTable.workspacePvcUid] = workspace.pvcUid
+            it[RuntimesTable.createdAt] = now
+            it[RuntimesTable.updatedAt] = now
+        }
         findByIdOrThrow(id)
     }
 
@@ -182,6 +233,10 @@ open class RuntimeRepository {
         createdAt = this[RuntimesTable.createdAt],
         updatedAt = this[RuntimesTable.updatedAt],
         lastReadyObservedAt = this[RuntimesTable.lastReadyObservedAt],
+        workspacePlacementGeneration = this[RuntimesTable.workspacePlacementGeneration],
+        workspacePvcNamespace = this[RuntimesTable.workspacePvcNamespace],
+        workspacePvcName = this[RuntimesTable.workspacePvcName],
+        workspacePvcUid = this[RuntimesTable.workspacePvcUid],
     )
 
     companion object {

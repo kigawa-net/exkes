@@ -149,7 +149,7 @@ class KubernetesRuntimeProvider(
     private fun verifiedWorkspace(runtime: Runtime): Workspace {
         val workspace = workspaceRepository.findById(runtime.workspaceId)
             ?: throw KubernetesRuntimeException("Workspace not found for runtime ${runtime.id}")
-        if (!workspace.canAttachRuntime() || workspace.pvcNamespace != namespace) {
+        if (!runtime.matchesWorkspacePlacement(workspace) || workspace.pvcNamespace != namespace) {
             throw KubernetesRuntimeException("Workspace placement is not verified in the Runtime namespace for ${runtime.id}")
         }
         return workspace
