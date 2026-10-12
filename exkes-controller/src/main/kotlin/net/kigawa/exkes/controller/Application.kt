@@ -68,6 +68,7 @@ fun Application.module() {
     val workspaceReconciler = WorkspaceReconciler(
         repository = workspaceRepository,
         provisioner = workspaceProvisioner,
+        runtimeRepository = runtimeRepository,
         resourceNamespace = kubernetesConfig.resourceNamespace,
         intervalSeconds = controllerConfig.reconciler.intervalSeconds,
         maxAttempts = controllerConfig.reconciler.maxAttempts,

@@ -6,6 +6,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
+import net.kigawa.exkes.common.db.RuntimeRepository
 import net.kigawa.exkes.common.db.WorkspaceRepository
 import net.kigawa.exkes.common.domain.Workspace
 import net.kigawa.exkes.common.domain.WorkspacePlacementState
@@ -34,6 +35,8 @@ import org.slf4j.LoggerFactory
 class WorkspaceReconciler(
     private val repository: WorkspaceRepository,
     private val provisioner: WorkspaceProvisioner,
+    /** Fail-closed deletion guard: all historical writers require authoritative stop evidence. */
+    private val runtimeRepository: RuntimeRepository,
     /** Trusted target for NEW Workspaces; null keeps existing fake tests independent of Kubernetes. */
     private val resourceNamespace: String? = null,
     private val intervalSeconds: Long = DEFAULT_INTERVAL_SECONDS,
@@ -203,6 +206,19 @@ class WorkspaceReconciler(
     private fun processDeleting(workspaces: List<Workspace>) {
         for (workspace in workspaces) {
             try {
+                // Until PodUID/WriterGeneration termination receipts (#58/#31)
+                // exist, even a terminal Runtime DB row may leave a live child
+                // process. Never request a PVC deletion if ANY Runtime history
+                // is present; it is intentionally more conservative than list(),
+                // which hides DELETED rows. A no-history Workspace can use the
+                // existing UID-preconditioned PVC deletion path.
+                if (runtimeRepository.hasRuntimeHistory(workspace.id)) {
+                    logger.warn(
+                        "holding Workspace {} PVC deletion: Runtime history has no verified writer termination evidence",
+                        workspace.id,
+                    )
+                    continue
+                }
                 // Two-phase protocol: the first call requests the deletion and
                 // answers false; only a later cycle observes the PVC gone (404)
                 // and answers true.
