@@ -73,8 +73,25 @@ data class Runtime(
     val updatedAt: Instant,
     /** Last Pod Ready=True observation by the controller; null when admission is closed. */
     val lastReadyObservedAt: Instant? = null,
+    /** Immutable Workspace/PVC placement snapshot; null is a legacy unsafe binding. */
+    val workspacePlacementGeneration: Long? = null,
+    val workspacePvcNamespace: String? = null,
+    val workspacePvcName: String? = null,
+    val workspacePvcUid: String? = null,
 ) {
     fun canTransitionTo(to: RuntimeStatus): Boolean = RuntimeStatus.canTransition(status, to)
+
+    /** Never infer a legacy Runtime's PVC binding from controller configuration. */
+    fun matchesWorkspacePlacement(workspace: Workspace): Boolean =
+        workspace.canAttachRuntime() &&
+            workspacePlacementGeneration != null &&
+            workspacePlacementGeneration == workspace.placementGeneration &&
+            !workspacePvcNamespace.isNullOrBlank() &&
+            workspacePvcNamespace == workspace.pvcNamespace &&
+            !workspacePvcUid.isNullOrBlank() &&
+            workspacePvcUid == workspace.pvcUid &&
+            !workspacePvcName.isNullOrBlank() &&
+            workspacePvcName == workspace.pvcName
 
     companion object {
         const val POD_NAME_PREFIX: String = "rt-"
