@@ -51,7 +51,7 @@ class KubernetesRuntimeProvider(
     private val json = Json { ignoreUnknownKeys = true }
 
     private val api: CoreV1Api by lazy { CoreV1Api(KubernetesClientFactory.createClient(kubernetesConfig)) }
-    private val namespace: String = kubernetesConfig.namespace
+    private val namespace: String = kubernetesConfig.resourceNamespace
 
     override fun createRuntime(runtime: Runtime): String {
         val template = templateRepository.findById(runtime.templateId)

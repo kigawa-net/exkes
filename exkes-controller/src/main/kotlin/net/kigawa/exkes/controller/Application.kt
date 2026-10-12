@@ -103,8 +103,9 @@ fun Application.module() {
     }
 
     logger.info(
-        "exkes-controller started (namespace={}, interval={}s, maxAttempts={}, creatingTimeout={}s)",
-        kubernetesConfig.namespace,
+        "exkes-controller started (controlNamespace={}, resourceNamespace={}, interval={}s, maxAttempts={}, creatingTimeout={}s)",
+        kubernetesConfig.controlNamespace,
+        kubernetesConfig.resourceNamespace,
         controllerConfig.reconciler.intervalSeconds,
         controllerConfig.reconciler.maxAttempts,
         controllerConfig.reconciler.creatingTimeoutSeconds,
