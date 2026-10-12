@@ -8,6 +8,7 @@ import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
 import net.kigawa.exkes.common.db.WorkspaceRepository
 import net.kigawa.exkes.common.domain.Workspace
+import net.kigawa.exkes.common.domain.WorkspacePlacementState
 import net.kigawa.exkes.common.domain.WorkspaceStatus
 import org.slf4j.LoggerFactory
 
@@ -33,6 +34,8 @@ import org.slf4j.LoggerFactory
 class WorkspaceReconciler(
     private val repository: WorkspaceRepository,
     private val provisioner: WorkspaceProvisioner,
+    /** Trusted target for NEW Workspaces; null keeps existing fake tests independent of Kubernetes. */
+    private val resourceNamespace: String? = null,
     private val intervalSeconds: Long = DEFAULT_INTERVAL_SECONDS,
     private val maxAttempts: Int = DEFAULT_MAX_ATTEMPTS,
     private val creatingTimeoutSeconds: Long = DEFAULT_CREATING_TIMEOUT_SECONDS,
@@ -106,14 +109,39 @@ class WorkspaceReconciler(
                 continue
             }
             try {
-                val outcome = provisioner.ensurePvc(workspace)
-                if (workspace.pvcName == null && !repository.setPvcName(workspace.id, outcome.pvcName)) {
-                    // The workspace moved out of CREATING between the read and
-                    // the write; nothing to record.
-                    logger.info(
-                        "skipped pvc_name update for workspace {} (no longer CREATING)",
-                        workspace.id,
-                    )
+                // Reserve namespace before any Kubernetes create call. Legacy READY
+                // rows cannot take this path; they need explicit migration (#39).
+                val target = if (resourceNamespace != null) {
+                    if (workspace.placementState == WorkspacePlacementState.UNBOUND &&
+                        !repository.reservePlacementForCreating(workspace.id, resourceNamespace)
+                    ) {
+                        // A concurrent delete/migration may have won the CAS.
+                        continue
+                    }
+                    repository.findById(workspace.id)
+                        ?: throw IllegalStateException("Workspace vanished during placement reservation")
+                } else workspace
+                val outcome = provisioner.ensurePvc(target)
+                if (target.pvcName == null && !repository.setPvcName(target.id, outcome.pvcName)) {
+                    // Refuse to verify a PVC if concurrent deletion won.
+                    continue
+                }
+                if (resourceNamespace != null) {
+                    if (outcome.createdByThisAttempt) {
+                        val uid = requireNotNull(outcome.pvcUid) {
+                            "Kubernetes PVC create did not return an object UID"
+                        }
+                        if (!repository.recordVerifiedPvcUid(target.id, resourceNamespace, uid)) {
+                            // A concurrent delete or placement update may have won the CAS.
+                            throw IllegalStateException("Could not durably bind PVC UID for ${target.id}")
+                        }
+                    }
+                    val verified = repository.findById(target.id)
+                    require(verified?.placementState == WorkspacePlacementState.VERIFIED &&
+                        verified.pvcNamespace == resourceNamespace &&
+                        verified.pvcUid != null &&
+                        verified.pvcUid == outcome.pvcUid
+                    ) { "Workspace ${target.id} PVC identity is not verified" }
                 }
                 if (outcome.state == PvcState.BOUND) {
                     if (repository.transition(workspace.id, WorkspaceStatus.CREATING, WorkspaceStatus.READY)) {
