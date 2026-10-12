@@ -42,6 +42,20 @@ enum class WorkspaceStatus {
 }
 
 /**
+ * Durable PVC placement lifecycle, independent of WorkspaceStatus.
+ *
+ * UNBOUND is the safe default for legacy rows; it is not evidence that
+ * the Workspace has no PVC. RESERVED means a trusted controller selected
+ * the namespace. VERIFIED requires a validated Kubernetes PVC identity.
+ */
+enum class WorkspacePlacementState {
+    UNBOUND,
+    RESERVED,
+    VERIFIED,
+    MIGRATION_BLOCKED,
+}
+
+/**
  * Workspace: a filesystem that outlives Runtimes and is persisted on CephFS.
  * The MariaDB row is the source of truth; the PVC is derived from it.
  */
@@ -57,6 +71,10 @@ data class Workspace(
     val archivedAt: Instant?,
     val createdAt: Instant,
     val updatedAt: Instant,
+    val pvcNamespace: String? = null,
+    val pvcUid: String? = null,
+    val placementGeneration: Long = 0,
+    val placementState: WorkspacePlacementState = WorkspacePlacementState.UNBOUND,
 ) {
     fun canTransitionTo(to: WorkspaceStatus): Boolean = WorkspaceStatus.canTransition(status, to)
 
