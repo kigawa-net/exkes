@@ -252,6 +252,13 @@ class RuntimeService(
             if (runtime.status != RuntimeStatus.RUNNING) {
                 throw InvalidRuntimeRequestException("runtime ${runtimeId} is not RUNNING (status=${runtime.status})")
             }
+            // A fresh Pod Ready timestamp does not prove that the Workspace PVC
+            // is still attached/verified. This is an additional fail-closed guard;
+            // atomic generation-fenced admission is tracked in #50/#52.
+            val workspace = workspaceRepository.findById(runtime.workspaceId)
+            if (workspace?.canAttachRuntime() != true) {
+                throw RuntimeNotAdmittingException(runtimeId, "Workspace PVC placement is not verified")
+            }
             // The DB status alone is not enough: the controller may be down, or the Pod may have
             // turned NotReady since the last observation. Require a fresh Ready observation.
             // Compare full Duration values: Duration.seconds truncates, so 15.9999s would read as 15s and a stale

@@ -158,6 +158,15 @@ class RuntimeServiceTest {
     }
 
     @Test
+    fun `fresh Pod Ready does not admit execution after Workspace deletion starts`() {
+        val rt = runtimeIn(RuntimeStatus.RUNNING)
+        observeReady(rt.id)
+        assertEquals(true, workspaces.transition(workspaceId, WorkspaceStatus.READY, WorkspaceStatus.DELETING))
+        assertFailsWith<RuntimeNotAdmittingException> { submit(rt.id) }
+        assertEquals(0L, ExecutionRepository().list(rt.id, null, 10, 0).total)
+    }
+
+    @Test
     fun `running runtime without any ready observation is refused`() {
         val rt = runtimeIn(RuntimeStatus.RUNNING)
         assertFailsWith<RuntimeNotAdmittingException> { submit(rt.id) }

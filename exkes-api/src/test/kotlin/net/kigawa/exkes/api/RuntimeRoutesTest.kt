@@ -99,6 +99,12 @@ class RuntimeRoutesTest {
      */
     private fun runningRuntime(): Pair<String, String> {
         val workspace = workspaces.create(uniqueName("rt-ws"), "rook-cephfs", 1024L, emptyMap())
+        // Route tests simulate a current Kubernetes PVC identity. An UNBOUND
+        // legacy Workspace must never be used to admit a new Execution.
+        val namespace = "platform-exkes-stg-sandbox"
+        assertTrue(workspaces.reservePlacementForCreating(workspace.id, namespace))
+        assertTrue(workspaces.setPvcName(workspace.id, "ws-${workspace.id}"))
+        assertTrue(workspaces.recordVerifiedPvcUid(workspace.id, namespace, "uid-${workspace.id}"))
         workspaces.transition(workspace.id, WorkspaceStatus.CREATING, WorkspaceStatus.READY)
         val runtime = runtimes.create(workspace.id, "route-template", null, null, null, null)
         runtimes.transition(runtime.id, RuntimeStatus.CREATING, RuntimeStatus.STARTING)
