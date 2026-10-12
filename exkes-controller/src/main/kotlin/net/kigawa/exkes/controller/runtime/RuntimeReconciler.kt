@@ -200,6 +200,8 @@ class RuntimeReconciler(
         for (runtime in runtimes) {
             // Check TTL expiry
             if (isExpired(runtime)) {
+                // A terminal/expired Runtime must not retain a stale Ready grant.
+                clearReady(runtime)
                 val message = "TTL expired (${runtime.ttlSeconds}s)"
                 if (runtimeRepository.transition(runtime.id, RuntimeStatus.RUNNING, RuntimeStatus.EXPIRED, message)) {
                     attempts.remove(runtime.id)
