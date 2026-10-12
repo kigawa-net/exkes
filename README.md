@@ -116,7 +116,7 @@ docker build --build-arg MODULE=exkes-api -t exkes-api:local .
   新しいリソースは作られず、応答に `Idempotent-Replayed: true` が付く。
 - 同じキーで要求内容が違う場合は 422 `VALIDATION_ERROR`。
 - キーの範囲は操作ごと（`workspaces` / `runtimes:<workspaceId>` / `executions:<runtimeId>`）。
-- キーの記録は Flyway `V4__idempotency_and_execution_labels.sql` の `idempotency_keys` テーブルに保存する。
+- キーの記録は Flyway `V5__idempotency_and_execution_labels.sql` の `idempotency_keys` テーブルに保存する。
 - キーを省略した場合は従来どおり（再送を束ねない）。
 
 #### 一覧フィルタ・取消（Kivra 連携向け）

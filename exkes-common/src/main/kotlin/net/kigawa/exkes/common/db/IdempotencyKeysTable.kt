@@ -4,7 +4,7 @@ import org.jetbrains.exposed.sql.Table
 import org.jetbrains.exposed.sql.javatime.timestamp
 
 /**
- * Exposed definition of `idempotency_keys` (db/migration/V4). The DDL is authoritative.
+ * Exposed definition of `idempotency_keys` (db/migration/V5). The DDL is authoritative.
  */
 object IdempotencyKeysTable : Table("idempotency_keys") {
     val scope = varchar("scope", 128)

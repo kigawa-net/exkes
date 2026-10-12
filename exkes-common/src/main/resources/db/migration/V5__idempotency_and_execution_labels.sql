@@ -1,4 +1,4 @@
--- V4: POST の Idempotency-Key（同一キーの再送を同一リソースへ束ねる）と Execution の labels。
+-- V5: POST の Idempotency-Key（同一キーの再送を同一リソースへ束ねる）と Execution の labels。
 -- V1〜V3 は変更しない。
 
 -- scope は操作ごとの名前空間（workspaces / runtimes:<workspaceId> / executions:<runtimeId>）。
