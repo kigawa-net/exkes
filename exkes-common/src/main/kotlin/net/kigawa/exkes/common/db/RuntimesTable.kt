@@ -22,6 +22,12 @@ object RuntimesTable : Table("runtimes") {
     val createdAt = timestamp("created_at")
     val updatedAt = timestamp("updated_at")
     val lastReadyObservedAt = timestamp("last_ready_observed_at").nullable()
+    // V7: immutable Workspace placement identity captured at Runtime admission.
+    // Null on legacy rows: never infer UID or namespace from mutable controller config.
+    val workspacePlacementGeneration = long("workspace_placement_generation").nullable()
+    val workspacePvcNamespace = varchar("workspace_pvc_namespace", 63).nullable()
+    val workspacePvcName = varchar("workspace_pvc_name", 128).nullable()
+    val workspacePvcUid = varchar("workspace_pvc_uid", 64).nullable()
 
     override val primaryKey = PrimaryKey(id)
 }
