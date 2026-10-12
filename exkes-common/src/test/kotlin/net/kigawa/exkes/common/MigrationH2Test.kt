@@ -33,8 +33,23 @@ class MigrationH2Test {
 
     @Test
     fun `flyway applies all migrations on h2`() = withMigratedDatabase { _, result ->
-        assertEquals(6, result.migrationsExecuted)
+        assertEquals(7, result.migrationsExecuted)
     }
+
+    @Test
+    fun `V7 leaves legacy Runtime placement columns null rather than inventing a UID`() =
+        withMigratedDatabase { dataSource, _ ->
+            dataSource.connection.use { conn ->
+                conn.createStatement().use { stmt ->
+                    stmt.executeQuery(
+                        "SELECT workspace_placement_generation, workspace_pvc_namespace, " +
+                            "workspace_pvc_name, workspace_pvc_uid FROM runtimes",
+                    ).use { rs ->
+                        assertTrue(!rs.next(), "fresh runtimes table must be empty")
+                    }
+                }
+            }
+        }
 
     @Test
     fun `runtimes table has the nullable last_ready_observed_at column from V4`() = withMigratedDatabase { dataSource, _ ->
