@@ -66,8 +66,13 @@ class KubernetesRuntimeProvider(
             podName
         } catch (e: ApiException) {
             if (e.code == 409) {
-                // Lost a creation race; the next read observes the winner.
-                readPod(podName)?.metadata?.name ?: throw e
+                // Lost a creation race (another actor created the same name). Adopt the Pod
+                // only when it belongs to this runtime; a foreign Pod is never attached.
+                val existing = readPod(podName) ?: throw e
+                if (!isPodOwnedBy(existing, runtime.id)) {
+                    throw KubernetesRuntimeException("Pod $podName exists but is not owned by runtime ${runtime.id}", e)
+                }
+                podName
             } else {
                 throw KubernetesRuntimeException("failed to create Pod $podName: ${e.message}", e)
             }
@@ -78,7 +83,11 @@ class KubernetesRuntimeProvider(
         // Restart path: stop deleted the Pod but kept the Workspace PVC, so a missing
         // Pod is recreated here (re-attaching the PVC). An existing Pod is left alone.
         val podName = resolvePodName(runtime)
-        if (readPod(podName) != null) {
+        val existing = readPod(podName)
+        if (existing != null) {
+            if (!isPodOwnedBy(existing, runtime.id)) {
+                throw KubernetesRuntimeException("Pod $podName exists but is not owned by runtime ${runtime.id}")
+            }
             logger.debug("startRuntime called for {} (Pod {} exists)", runtime.id, podName)
             return
         }
@@ -111,6 +120,7 @@ class KubernetesRuntimeProvider(
         val pod = readPod(podName)
         return when {
             pod == null -> RuntimeStatus.FAILED // Pod vanished unexpectedly
+            !isPodOwnedBy(pod, runtime.id) -> RuntimeStatus.FAILED // a name clash is not this runtime's Pod
             else -> mapPodPhaseToRuntimeStatus(pod)
         }
     }
@@ -253,6 +263,16 @@ class KubernetesRuntimeProvider(
     } catch (e: ApiException) {
         if (e.code == 404) null else throw e
     }
+}
+
+/**
+ * True when [pod] carries the labels exkes sets on every Pod it creates for [runtimeId].
+ * Used before adopting an existing Pod (409 on create, restart) so exkes never attaches
+ * to a Pod it did not create for this runtime.
+ */
+internal fun isPodOwnedBy(pod: V1Pod, runtimeId: String): Boolean {
+    val labels = pod.metadata?.labels ?: return false
+    return labels["app.kubernetes.io/managed-by"] == "exkes" && labels["exkes.runtime-id"] == runtimeId
 }
 
 /**

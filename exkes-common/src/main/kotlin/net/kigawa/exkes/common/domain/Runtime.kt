@@ -14,6 +14,10 @@ import java.time.Instant
  *    |         |          +-------------------------> FAILED ---------------+
  *    |         +---------------------------------> FAILED ------------------+
  *    +-----------------------------------------> FAILED --------------------+
+ *
+ * RUNNING <-> DEGRADED: the Pod stayed NotReady (Ready=False) past the grace period
+ * (DEGRADED); it returns to RUNNING once Ready=True again. DEGRADED accepts no new
+ * Execution (exkes-api only admits RUNNING runtimes).
  * ```
  *
  * All transitions are enforced by [RuntimeRepository#transition] via a
@@ -23,6 +27,7 @@ enum class RuntimeStatus {
     CREATING,
     STARTING,
     RUNNING,
+    DEGRADED,
     STOPPING,
     STOPPED,
     FAILED,
@@ -34,7 +39,8 @@ enum class RuntimeStatus {
         private val ALLOWED_TRANSITIONS: Map<RuntimeStatus, Set<RuntimeStatus>> = mapOf(
             CREATING to setOf(STARTING, FAILED, DELETING),
             STARTING to setOf(RUNNING, FAILED, DELETING),
-            RUNNING to setOf(STOPPING, FAILED, EXPIRED, DELETING),
+            RUNNING to setOf(STOPPING, FAILED, EXPIRED, DELETING, DEGRADED),
+            DEGRADED to setOf(RUNNING, STOPPING, FAILED, EXPIRED, DELETING),
             STOPPING to setOf(STOPPED, FAILED, DELETING),
             STOPPED to setOf(STARTING, DELETING),
             FAILED to setOf(DELETING),
