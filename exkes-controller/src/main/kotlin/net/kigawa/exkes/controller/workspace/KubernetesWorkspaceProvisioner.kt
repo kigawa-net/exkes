@@ -20,7 +20,7 @@ import org.slf4j.LoggerFactory
  * - accessMode: ReadWriteMany (multiple Runtimes may mount the same workspace)
  * - labels: app.kubernetes.io/managed-by=exkes, exkes.workspace-id=<id>
  *
- * This is the only Kubernetes write path of the Control Plane. exkes-api has no
+ * Workspace PVCs are created in the sandbox resource namespace, alongside Runtime Pods. exkes-api has no
  * client-java dependency and runs without a ServiceAccount token, so this class
  * has to be moved together with its RBAC (issue #2 "Controller RBAC").
  *
@@ -52,7 +52,7 @@ class KubernetesWorkspaceProvisioner(
     override fun deletePvc(workspace: Workspace): Boolean {
         val name = workspace.resolvePvcName()
         try {
-            api.deleteNamespacedPersistentVolumeClaim(name, config.namespace)
+            api.deleteNamespacedPersistentVolumeClaim(name, config.resourceNamespace)
                 .propagationPolicy("Foreground")
                 .execute()
             logger.info("delete requested for PVC {} of workspace {}", name, workspace.id)
@@ -65,7 +65,7 @@ class KubernetesWorkspaceProvisioner(
     }
 
     private fun readPvc(name: String): V1PersistentVolumeClaim? = try {
-        api.readNamespacedPersistentVolumeClaim(name, config.namespace).execute()
+        api.readNamespacedPersistentVolumeClaim(name, config.resourceNamespace).execute()
     } catch (e: ApiException) {
         if (e.code == 404) null else throw e
     }
@@ -85,7 +85,7 @@ class KubernetesWorkspaceProvisioner(
             .metadata(
                 V1ObjectMeta()
                     .name(name)
-                    .namespace(config.namespace)
+                    .namespace(config.resourceNamespace)
                     .labels(
                         mapOf(
                             MANAGED_BY_LABEL to MANAGED_BY_VALUE,
@@ -96,7 +96,7 @@ class KubernetesWorkspaceProvisioner(
             .spec(spec)
 
         return try {
-            api.createNamespacedPersistentVolumeClaim(config.namespace, pvc).execute()
+            api.createNamespacedPersistentVolumeClaim(config.resourceNamespace, pvc).execute()
                 .also { logger.info("created PVC {} for workspace {}", name, workspace.id) }
         } catch (e: ApiException) {
             if (e.code == 409) {
