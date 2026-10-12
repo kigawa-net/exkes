@@ -4,6 +4,7 @@ import java.time.Instant
 import java.util.UUID
 import kotlinx.serialization.json.Json
 import net.kigawa.exkes.common.domain.Workspace
+import net.kigawa.exkes.common.domain.WorkspacePlacementState
 import net.kigawa.exkes.common.domain.WorkspaceStatus
 import org.jetbrains.exposed.exceptions.ExposedSQLException
 import org.jetbrains.exposed.sql.Op
@@ -152,6 +153,65 @@ open class WorkspaceRepository {
         updated > 0
     }
 
+    /**
+     * Reserve a placement only for a new CREATING Workspace. A legacy/READY
+     * Workspace must never be automatically bound to the current config's
+     * namespace. A caller must use a trusted placement decision, not a
+     * client-provided namespace.
+     *
+     * This is a schema/repository building block; controller rollout and
+     * legacy inventory/migration are separate work under #39/#41.
+     */
+    fun reservePlacementForCreating(id: String, namespace: String): Boolean {
+        require(namespace.length in 1..63 && NAMESPACE_PATTERN.matches(namespace)) {
+            "invalid Kubernetes namespace"
+        }
+        return transaction {
+            val updated = WorkspacesTable.update({
+                (WorkspacesTable.id eq id) and
+                    (WorkspacesTable.status eq WorkspaceStatus.CREATING.name) and
+                    (WorkspacesTable.placementState eq WorkspacePlacementState.UNBOUND.name) and
+                    (WorkspacesTable.placementGeneration eq 0L) and
+                    WorkspacesTable.pvcNamespace.isNull()
+            }) { stmt ->
+                stmt[WorkspacesTable.pvcNamespace] = namespace
+                stmt[WorkspacesTable.placementState] = WorkspacePlacementState.RESERVED.name
+                stmt[WorkspacesTable.placementGeneration] = 1L
+                stmt[WorkspacesTable.updatedAt] = nowUtc()
+            }
+            updated == 1
+        }
+    }
+
+    /**
+     * Persist an already-verified observed PVC UID. Callers MUST verify the
+     * PVC namespace, labels, storage specification and ownership/creation
+     * evidence before calling (see #41); this method does not trust raw UID
+     * input from a public API.
+     *
+     * A second/different UID cannot replace the original identity.
+     */
+    fun recordVerifiedPvcUid(id: String, namespace: String, pvcUid: String): Boolean {
+        require(pvcUid.isNotBlank() && pvcUid.length <= 64) { "invalid PVC UID" }
+        return transaction {
+            val updated = WorkspacesTable.update({
+                (WorkspacesTable.id eq id) and
+                    (WorkspacesTable.status eq WorkspaceStatus.CREATING.name) and
+                    (WorkspacesTable.pvcNamespace eq namespace) and
+                    (WorkspacesTable.pvcName eq Workspace.pvcNameFor(id)) and
+                    (WorkspacesTable.pvcUid.isNull()) and
+                    (WorkspacesTable.placementState eq WorkspacePlacementState.RESERVED.name) and
+                    (WorkspacesTable.placementGeneration eq 1L)
+            }) { stmt ->
+                stmt[WorkspacesTable.pvcUid] = pvcUid
+                stmt[WorkspacesTable.placementState] = WorkspacePlacementState.VERIFIED.name
+                stmt[WorkspacesTable.placementGeneration] = 2L
+                stmt[WorkspacesTable.updatedAt] = nowUtc()
+            }
+            updated == 1
+        }
+    }
+
     private fun findByIdOrThrow(id: String): Workspace =
         findById(id) ?: throw IllegalStateException("workspace vanished after insert: $id")
 
@@ -167,9 +227,14 @@ open class WorkspaceRepository {
         archivedAt = this[WorkspacesTable.archivedAt],
         createdAt = this[WorkspacesTable.createdAt],
         updatedAt = this[WorkspacesTable.updatedAt],
+        pvcNamespace = this[WorkspacesTable.pvcNamespace],
+        pvcUid = this[WorkspacesTable.pvcUid],
+        placementGeneration = this[WorkspacesTable.placementGeneration],
+        placementState = WorkspacePlacementState.valueOf(this[WorkspacesTable.placementState]),
     )
 
     companion object {
+        private val NAMESPACE_PATTERN = Regex("[a-z0-9]([-a-z0-9]*[a-z0-9])?")
         fun nowUtc(): Instant = Instant.now()
     }
 }
