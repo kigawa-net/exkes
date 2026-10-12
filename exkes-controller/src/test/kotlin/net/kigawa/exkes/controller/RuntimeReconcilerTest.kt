@@ -25,6 +25,7 @@ import net.kigawa.exkes.common.domain.RuntimeStatus
 import net.kigawa.exkes.common.domain.WorkspaceStatus
 import net.kigawa.exkes.controller.runtime.RuntimeProvisioner
 import net.kigawa.exkes.controller.runtime.RuntimeReconciler
+import net.kigawa.exkes.controller.runtime.RuntimePvcUnverifiedException
 import net.kigawa.exkes.controller.runtime.isPodOwnedBy
 import net.kigawa.exkes.controller.runtime.mapPodToRuntimeStatus
 
@@ -42,6 +43,7 @@ class RuntimeReconcilerTest {
         val pods = mutableSetOf<String>()
         var podStatus: RuntimeStatus = RuntimeStatus.RUNNING
         var createFailures = 0
+        var livePvcUnavailable = false
         val createCalls = mutableListOf<String>()
 
         /** Runs once at the start of the next startRuntime call (simulates a racing actor). */
@@ -51,6 +53,7 @@ class RuntimeReconcilerTest {
         var beforeStatus: (() -> Unit)? = null
 
         override fun createRuntime(runtime: Runtime): String {
+            if (livePvcUnavailable) throw RuntimePvcUnverifiedException("live PVC UID unavailable")
             if (createFailures > 0) {
                 createFailures--
                 throw RuntimeException("boom")
@@ -61,6 +64,7 @@ class RuntimeReconcilerTest {
         }
 
         override fun startRuntime(runtime: Runtime) {
+            if (livePvcUnavailable) throw RuntimePvcUnverifiedException("live PVC UID unavailable")
             beforeStart?.let { beforeStart = null; it() }
             if (resolvePodName(runtime) !in pods) createRuntime(runtime)
         }
@@ -132,6 +136,30 @@ class RuntimeReconcilerTest {
         reconciler.reconcileOnce()
         assertEquals(RuntimeStatus.FAILED, status(runtime.id))
         assertTrue(provisioner.createCalls.isEmpty())
+    }
+
+    @Test
+    fun `missing PVC identity holds creating intent instead of falsely terminating a Pod`() {
+        val runtime = newRuntime()
+        provisioner.livePvcUnavailable = true
+        repeat(5) { reconciler.reconcileOnce() }
+        assertEquals(RuntimeStatus.CREATING, status(runtime.id))
+        assertTrue(provisioner.createCalls.isEmpty())
+        provisioner.livePvcUnavailable = false
+        reconciler.reconcileOnce()
+        assertEquals(RuntimeStatus.STARTING, status(runtime.id))
+    }
+
+    @Test
+    fun `missing PVC identity holds starting intent without marking previous Pod terminated`() {
+        val runtime = newRuntime()
+        assertTrue(runtimes.transition(runtime.id, RuntimeStatus.CREATING, RuntimeStatus.STARTING))
+        provisioner.livePvcUnavailable = true
+        repeat(5) { reconciler.reconcileOnce() }
+        assertEquals(RuntimeStatus.STARTING, status(runtime.id))
+        provisioner.livePvcUnavailable = false
+        reconciler.reconcileOnce()
+        assertEquals(RuntimeStatus.RUNNING, status(runtime.id))
     }
 
     @Test
