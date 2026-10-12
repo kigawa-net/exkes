@@ -198,6 +198,14 @@ class RuntimeReconciler(
 
     private fun processRunning(runtimes: List<Runtime>) {
         for (runtime in runtimes) {
+            if (!isWorkspacePlacementValid(runtime)) {
+                // Do not re-open admission from a Ready observation on a stale
+                // or legacy Workspace; the Pod may still be physically running.
+                clearReady(runtime)
+                notReadySince.remove(runtime.id)
+                logger.warn("closed Runtime {} admission: Workspace placement is not verified", runtime.id)
+                continue
+            }
             // Check TTL expiry
             if (isExpired(runtime)) {
                 val message = "TTL expired (${runtime.ttlSeconds}s)"
@@ -234,6 +242,12 @@ class RuntimeReconciler(
      */
     private fun processDegraded(runtimes: List<Runtime>) {
         for (runtime in runtimes) {
+            if (!isWorkspacePlacementValid(runtime)) {
+                clearReady(runtime)
+                notReadySince.remove(runtime.id)
+                logger.warn("Runtime {} remains DEGRADED: Workspace placement is not verified", runtime.id)
+                continue
+            }
             if (isExpired(runtime)) {
                 val message = "TTL expired (${runtime.ttlSeconds}s)"
                 if (runtimeRepository.transition(runtime.id, RuntimeStatus.DEGRADED, RuntimeStatus.EXPIRED, message)) {
@@ -290,9 +304,21 @@ class RuntimeReconciler(
      * runtime is RUNNING and this observation is fresh (see RuntimeService.createExecution).
      */
     private fun recordReady(runtime: Runtime) {
+        // Re-evaluate after observing Pod status: otherwise a concurrent
+        // Workspace DELETE can leave a newly refreshed Ready timestamp.
+        if (!isWorkspacePlacementValid(runtime)) {
+            clearReady(runtime)
+            return
+        }
         if (!runtimeRepository.recordReadyObserved(runtime.id, clock())) {
             logger.debug("skipped ready observation for runtime {} (no longer RUNNING/DEGRADED)", runtime.id)
         }
+    }
+
+    /** Read-only guard. Generation binding / transactional Ready CAS is #50/#52. */
+    private fun isWorkspacePlacementValid(runtime: Runtime): Boolean {
+        val workspace = workspaceRepository.findById(runtime.workspaceId)
+        return workspace?.canAttachRuntime() == true && workspace.pvcNamespace == resourceNamespace
     }
 
     /** Closes admission: clears the Ready observation so no stale RUNNING row is admitted. */
