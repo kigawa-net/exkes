@@ -87,6 +87,10 @@ private class Terminal(private val ws: DefaultClientWebSocketSession) {
 }
 
 class TerminalRoutesTest {
+    private companion object {
+        const val SLOT_RELEASE_TIMEOUT_NANOS = 30_000_000_000L
+    }
+
     private fun ApplicationTestBuilder.terminalClient() = createClient { install(WebSockets) }
 
     /** Waits until the process is gone. Zombies count as gone (see SystemProcessControl.isAlive). */
@@ -182,15 +186,27 @@ class TerminalRoutesTest {
         }
 
         // The first socket is gone. Its slot comes back once the shell has been torn down.
+        // A rejected attempt ends its socket right away, so every step of an attempt tolerates
+        // the socket closing underneath it; attempts are retried until a generous deadline.
         var reopened = false
-        for (attempt in 0 until 100) {
-            if (reopened) break
-            client.webSocket("/terminal") {
-                val terminal = Terminal(this)
-                terminal.input("echo r\$((40+2))\n")
-                reopened = terminal.waitMatch(Regex("r42")) != null
+        val deadline = System.nanoTime() + SLOT_RELEASE_TIMEOUT_NANOS
+        while (!reopened && System.nanoTime() < deadline) {
+            reopened = try {
+                var ok = false
+                client.webSocket("/terminal") {
+                    val terminal = Terminal(this)
+                    ok = try {
+                        terminal.input("echo r\$((40+2))\n")
+                        terminal.waitMatch(Regex("r42")) != null
+                    } catch (e: Exception) {
+                        false
+                    }
+                }
+                ok
+            } catch (e: Exception) {
+                false
             }
-            if (!reopened) delay(50)
+            if (!reopened) delay(100)
         }
         assertTrue(reopened, "the session slot was never released")
     }
@@ -244,10 +260,11 @@ class TerminalRoutesTest {
         application { agentModule(InMemoryExecutionStore()) }
         terminalClient().webSocket("/terminal") {
             val terminal = Terminal(this)
+            // The shell's prompt may arrive before any error, so skip output while waiting for each error.
             terminal.sendRaw("""{"type":"no-such-type"}""")
-            assertIs<TerminalServerMessage.Error>(terminal.receive())
+            terminal.receiveError()
             terminal.sendRaw("""{"type":"resize","cols":0,"rows":10}""")
-            assertIs<TerminalServerMessage.Error>(terminal.receive())
+            terminal.receiveError()
             terminal.input("echo r\$((40+2))\n")
             terminal.waitFor("r42")
         }
