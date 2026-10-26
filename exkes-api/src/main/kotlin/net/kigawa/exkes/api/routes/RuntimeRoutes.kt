@@ -163,6 +163,24 @@ fun Route.configureExecutionRoutes(service: RuntimeService) {
 }
 
 /**
+ * /v1/runtimes/{runtimeId}/terminal-sessions (plan chapter 6.x, 第5MS).
+ *
+ * Answers 201 Created, not 202: the session is complete at response time (ISSUED, token
+ * included). There is no asynchronous state to poll, unlike Workspace or Runtime creation.
+ * The body carries the one-time plaintext token, so the response is marked `no-store`.
+ */
+fun Route.configureTerminalSessionRoutes(service: RuntimeService) {
+    route("/v1/runtimes/{runtimeId}/terminal-sessions") {
+        post {
+            val runtimeId = call.parameters["runtimeId"] ?: throw InvalidWorkspaceRequestException("missing runtime id")
+            val issued = service.createTerminalSession(runtimeId)
+            call.response.header(HttpHeaders.CacheControl, "no-store")
+            call.respond(HttpStatusCode.Created, issued.toResponse())
+        }
+    }
+}
+
+/**
  * Decodes the request body, normalizing Ktor / kotlinx.serialization decoding
  * failures into [InvalidWorkspaceRequestException] so StatusPages answers a
  * single 400 VALIDATION_ERROR shape.
