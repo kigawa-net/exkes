@@ -201,7 +201,7 @@ Dockerfile は変更不要（`MODULE` 引数の経路は既存のまま。`:exke
 
 ### Sandbox namespace（`platform-exkes-stg-sandbox`）
 
-既存の default-deny（`network-policy.yaml`、plan 7.3）に対し、Runtime Pod（`exkes.runtime: "true"`）の
+既存の default-deny（`network-policy.yaml`、plan 7.3）に対し、Runtime Pod（`app.kubernetes.io/managed-by: exkes`）の
 Ingress を gateway の Pod に限定して許可する。
 
 ```yaml
@@ -214,7 +214,7 @@ metadata:
 spec:
   podSelector:
     matchLabels:
-      exkes.runtime: "true"
+      app.kubernetes.io/managed-by: exkes   # controller が Pod に付けるラベル（exkes.runtime は付かない）
   policyTypes:
     - Ingress
   ingress:
@@ -249,7 +249,8 @@ metadata:
   namespace: platform-exkes-stg-sandbox
 spec:
   selector:
-    exkes.runtime-id: <runtime-id>   # Pod 側に付けるラベル
+    app.kubernetes.io/managed-by: exkes
+    exkes.runtime-id: <runtime-id>   # Pod 側に付けるラベル（RuntimeService.kt の selector と同じ）
   ports:
     - name: agent
       port: 8080
