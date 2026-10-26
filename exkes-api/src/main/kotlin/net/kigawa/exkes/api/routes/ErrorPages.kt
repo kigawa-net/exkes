@@ -13,6 +13,7 @@ import net.kigawa.exkes.api.runtime.ExecutionConflictException
 import net.kigawa.exkes.api.runtime.ExecutionNotFoundException
 import net.kigawa.exkes.api.runtime.InvalidRuntimeRequestException
 import net.kigawa.exkes.api.runtime.RuntimeConflictException
+import net.kigawa.exkes.api.runtime.RuntimeNotConnectableException
 import net.kigawa.exkes.api.runtime.RuntimeNotAdmittingException
 import net.kigawa.exkes.api.runtime.RuntimeNotFoundException
 import net.kigawa.exkes.api.workspace.InvalidWorkspaceRequestException
@@ -74,6 +75,11 @@ fun Application.installErrorPages() {
 
         exception<RuntimeConflictException> { call, cause ->
             call.respondError(HttpStatusCode.Conflict, "CONFLICT", cause.message ?: "conflict")
+        }
+
+        // Terminal sessions are issued only for RUNNING runtimes; other live states are a conflict.
+        exception<RuntimeNotConnectableException> { call, cause ->
+            call.respondError(HttpStatusCode.Conflict, "CONFLICT", cause.message ?: "runtime is not connectable")
         }
 
         exception<ExecutionConflictException> { call, cause ->

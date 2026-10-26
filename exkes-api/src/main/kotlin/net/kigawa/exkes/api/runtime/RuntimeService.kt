@@ -16,6 +16,7 @@ import net.kigawa.exkes.common.db.ExecutionRepository
 import net.kigawa.exkes.common.db.RuntimeListResult
 import net.kigawa.exkes.common.db.RuntimeRepository
 import net.kigawa.exkes.common.db.RuntimeTemplateRepository
+import net.kigawa.exkes.common.db.TerminalSessionRepository
 import net.kigawa.exkes.common.db.WorkspaceRepository
 import net.kigawa.exkes.common.db.WorkspacePlacementAdmissionException
 import net.kigawa.exkes.common.domain.Execution
@@ -24,6 +25,11 @@ import net.kigawa.exkes.common.domain.ExecutionType
 import net.kigawa.exkes.common.domain.Runtime
 import net.kigawa.exkes.common.domain.RuntimeStatus
 import net.kigawa.exkes.common.domain.RuntimeTemplate
+import net.kigawa.exkes.common.domain.TerminalSession
+import net.kigawa.exkes.common.domain.TerminalSessionToken
+import org.slf4j.LoggerFactory
+
+private val logger = LoggerFactory.getLogger("TerminalSessionAudit")
 
 class RuntimeNotFoundException(id: String) : RuntimeException("runtime not found: $id")
 
@@ -51,6 +57,23 @@ class RuntimeNotAdmittingException(id: String, reason: String) :
     RuntimeException("runtime $id is not admitting executions: $reason")
 
 /**
+ * A Terminal session can only be issued for a RUNNING runtime. Any other live status is a
+ * state conflict (409); the caller retries once the runtime is RUNNING.
+ */
+class RuntimeNotConnectableException(id: String, status: RuntimeStatus) :
+    RuntimeException("runtime $id is not RUNNING (status=$status)")
+
+/**
+ * A freshly issued Terminal session. [token] is the plaintext bearer credential: it exists
+ * only in this object and in the one HTTP response that carries it. It is excluded from
+ * [toString] so it cannot leak through logging of the object.
+ */
+class IssuedTerminalSession(val session: TerminalSession, val token: String) {
+    override fun toString(): String =
+        "IssuedTerminalSession(id=${session.id}, runtimeId=${session.runtimeId}, token=<redacted>)"
+}
+
+/**
  * Application service for /v1/workspaces/{workspaceId}/runtimes and /v1/runtimes/{runtimeId}/executions.
  *
  * Owns validation and is the boundary between the Ktor event loop and the
@@ -76,9 +99,15 @@ class RuntimeService(
     private val admissionFreshnessSeconds: Long = DEFAULT_ADMISSION_FRESHNESS_SECONDS,
     private val clock: () -> Instant = Instant::now,
     private val idempotencyRepository: IdempotencyRepository = IdempotencyRepository(),
+    private val terminalSessionRepository: TerminalSessionRepository = TerminalSessionRepository(),
+    /** Lifetime of an issued Terminal session token (API setting `exkes.terminal.sessionTtlSeconds`). */
+    private val terminalSessionTtlSeconds: Long = DEFAULT_TERMINAL_SESSION_TTL_SECONDS,
 ) {
     init {
         require(admissionFreshnessSeconds > 0) { "admissionFreshnessSeconds must be positive: $admissionFreshnessSeconds" }
+        require(terminalSessionTtlSeconds in 1..MAX_TERMINAL_SESSION_TTL_SECONDS) {
+            "terminalSessionTtlSeconds must be between 1 and $MAX_TERMINAL_SESSION_TTL_SECONDS: $terminalSessionTtlSeconds"
+        }
     }
 
     /**
@@ -229,6 +258,49 @@ class RuntimeService(
         throw RuntimeConflictException(id)
     }
 
+    // --- Terminal session API ---
+
+    /**
+     * Issues a single-use Terminal session token for a RUNNING runtime that passes the same
+     * admission guard as Executions (Workspace placement, fresh Ready observation, TTL).
+     *
+     * Only the SHA-256 of the token is persisted. The plaintext is returned exactly once, in
+     * [IssuedTerminalSession.token]; it is never written to the log. No Idempotency-Key: a replay
+     * could not return the token again without re-exposing it, so each call issues a new session.
+     *
+     * Status errors: unknown or DELETED runtime -> [RuntimeNotFoundException] (404);
+     * any other non-RUNNING status -> [RuntimeNotConnectableException] (409); a RUNNING runtime
+     * that is not admitting -> [RuntimeNotAdmittingException] (503, retryable).
+     */
+    suspend fun createTerminalSession(runtimeId: String): IssuedTerminalSession = onIoThread {
+        val runtime = runtimeRepository.findById(runtimeId)
+        if (runtime == null || runtime.status == RuntimeStatus.DELETED) {
+            throw RuntimeNotFoundException(runtimeId)
+        }
+        if (runtime.status != RuntimeStatus.RUNNING) {
+            throw RuntimeNotConnectableException(runtimeId, runtime.status)
+        }
+        val now = clock()
+        admitRuntime(runtime)
+
+        val token = TerminalSessionToken.generate()
+        val session = terminalSessionRepository.create(
+            runtimeId = runtimeId,
+            tokenHash = TerminalSessionToken.hash(token),
+            issuedAt = now,
+            expiresAt = now.plusSeconds(terminalSessionTtlSeconds),
+        )
+        // Audit trail. The token is deliberately absent: only identifiers are logged.
+        logger.info(
+            "terminal session issued sessionId={} runtimeId={} workspaceId={} expiresAt={}",
+            session.id,
+            runtime.id,
+            runtime.workspaceId,
+            session.expiresAt,
+        )
+        IssuedTerminalSession(session, token)
+    }
+
     // --- Execution API ---
 
     /**
@@ -255,32 +327,7 @@ class RuntimeService(
             if (runtime.status != RuntimeStatus.RUNNING) {
                 throw InvalidRuntimeRequestException("runtime ${runtimeId} is not RUNNING (status=${runtime.status})")
             }
-            // A fresh Pod Ready timestamp does not prove that the Workspace PVC
-            // is still attached/verified. This is an additional fail-closed guard;
-            // atomic generation-fenced admission is tracked in #50/#52.
-            val workspace = workspaceRepository.findById(runtime.workspaceId)
-            if (workspace?.canAttachRuntime() != true) {
-                throw RuntimeNotAdmittingException(runtimeId, "Workspace PVC placement is not verified")
-            }
-            // The DB status alone is not enough: the controller may be down, or the Pod may have
-            // turned NotReady since the last observation. Require a fresh Ready observation.
-            // Compare full Duration values: Duration.seconds truncates, so 15.9999s would read as 15s and a stale
-            // observation could still be admitted at the boundary.
-            val now = clock()
-            val readyAt = runtime.lastReadyObservedAt
-                ?: throw RuntimeNotAdmittingException(runtimeId, "no Ready observation")
-            if (Duration.between(readyAt, now) > Duration.ofSeconds(admissionFreshnessSeconds)) {
-                throw RuntimeNotAdmittingException(runtimeId, "last Ready observation is stale")
-            }
-            if (readyAt.isAfter(now.plusSeconds(admissionFreshnessSeconds))) {
-                throw RuntimeNotAdmittingException(runtimeId, "Ready observation is in the future")
-            }
-            // Same TTL rule as the controller: a runtime past its TTL must not start new work
-            // while the controller has not yet moved it to EXPIRED.
-            val ttl = runtime.ttlSeconds
-            if (ttl != null && ttl > 0 && Duration.between(runtime.createdAt, now) >= Duration.ofSeconds(ttl.toLong())) {
-                throw RuntimeNotAdmittingException(runtimeId, "TTL has expired")
-            }
+            admitRuntime(runtime)
 
             // Validate type-specific payload
             when (type) {
@@ -412,6 +459,42 @@ class RuntimeService(
             throw RuntimeConflictException("workspace placement changed for runtime $id")
         }
 
+    /**
+     * Admission guard shared by Executions and Terminal sessions. The caller has already
+     * checked that the runtime is RUNNING. Throws [RuntimeNotAdmittingException] (503) when:
+     * the Workspace placement is not verified, there is no fresh Ready observation, or the TTL
+     * has passed. The DB status alone is not enough: the controller may be down, or the Pod may
+     * have turned NotReady since the last observation.
+     */
+    private fun admitRuntime(runtime: Runtime) {
+        val runtimeId = runtime.id
+        // A fresh Pod Ready timestamp does not prove that the Workspace PVC
+        // is still attached/verified. This is an additional fail-closed guard;
+        // atomic generation-fenced admission is tracked in #50/#52.
+        val workspace = workspaceRepository.findById(runtime.workspaceId)
+        if (workspace?.canAttachRuntime() != true) {
+            throw RuntimeNotAdmittingException(runtimeId, "Workspace PVC placement is not verified")
+        }
+        // Require a fresh Ready observation. Compare full Duration values: Duration.seconds
+        // truncates, so 15.9999s would read as 15s and a stale observation could still be
+        // admitted at the boundary.
+        val now = clock()
+        val readyAt = runtime.lastReadyObservedAt
+            ?: throw RuntimeNotAdmittingException(runtimeId, "no Ready observation")
+        if (Duration.between(readyAt, now) > Duration.ofSeconds(admissionFreshnessSeconds)) {
+            throw RuntimeNotAdmittingException(runtimeId, "last Ready observation is stale")
+        }
+        if (readyAt.isAfter(now.plusSeconds(admissionFreshnessSeconds))) {
+            throw RuntimeNotAdmittingException(runtimeId, "Ready observation is in the future")
+        }
+        // Same TTL rule as the controller: a runtime past its TTL must not start new work
+        // while the controller has not yet moved it to EXPIRED.
+        val ttl = runtime.ttlSeconds
+        if (ttl != null && ttl > 0 && Duration.between(runtime.createdAt, now) >= Duration.ofSeconds(ttl.toLong())) {
+            throw RuntimeNotAdmittingException(runtimeId, "TTL has expired")
+        }
+    }
+
     private fun getBlocking(workspaceId: String, id: String): Runtime {
         val runtime = runtimeRepository.findById(id)
         if (runtime == null || runtime.status == RuntimeStatus.DELETED || runtime.workspaceId != workspaceId) {
@@ -424,6 +507,8 @@ class RuntimeService(
         const val MAX_LIMIT = 500
         const val MAX_TRANSITION_ATTEMPTS = 3
         const val DEFAULT_ADMISSION_FRESHNESS_SECONDS = 15L
+        const val DEFAULT_TERMINAL_SESSION_TTL_SECONDS = 300L
+        const val MAX_TERMINAL_SESSION_TTL_SECONDS = 3600L
         const val MAX_LABELS = 32
         const val MAX_LABEL_VALUE_LENGTH = 256
         private val LABEL_KEY_PATTERN = Regex("[A-Za-z0-9][A-Za-z0-9._/-]{0,62}")

@@ -8,6 +8,7 @@ import kotlinx.serialization.json.Json
 import net.kigawa.exkes.api.routes.configureExecutionRoutes
 import net.kigawa.exkes.api.routes.configureHealthRoutes
 import net.kigawa.exkes.api.routes.configureRuntimeRoutes
+import net.kigawa.exkes.api.routes.configureTerminalSessionRoutes
 import net.kigawa.exkes.api.routes.configureWorkspaceRoutes
 import net.kigawa.exkes.api.routes.installErrorPages
 import net.kigawa.exkes.api.runtime.RuntimeService
@@ -16,6 +17,7 @@ import net.kigawa.exkes.common.config.ExkesConfig
 import net.kigawa.exkes.common.db.ExecutionRepository
 import net.kigawa.exkes.common.db.RuntimeRepository
 import net.kigawa.exkes.common.db.RuntimeTemplateRepository
+import net.kigawa.exkes.common.db.TerminalSessionRepository
 import net.kigawa.exkes.common.db.WorkspaceRepository
 import net.kigawa.exkes.common.db.closeDataSource
 import net.kigawa.exkes.common.db.connectDatabase
@@ -67,12 +69,18 @@ fun Application.module() {
     val admissionFreshnessSeconds = environment.config
         .propertyOrNull("exkes.admission.freshnessSeconds")?.getString()?.toLong()
         ?: RuntimeService.DEFAULT_ADMISSION_FRESHNESS_SECONDS
+    // Terminal session token lifetime (API-only setting; exkes-controller never reads it).
+    val terminalSessionTtlSeconds = environment.config
+        .propertyOrNull("exkes.terminal.sessionTtlSeconds")?.getString()?.toLong()
+        ?: RuntimeService.DEFAULT_TERMINAL_SESSION_TTL_SECONDS
     val runtimeService = RuntimeService(
         runtimeRepository = runtimeRepository,
         executionRepository = executionRepository,
         templateRepository = templateRepository,
         workspaceRepository = workspaceRepository,
         admissionFreshnessSeconds = admissionFreshnessSeconds,
+        terminalSessionRepository = TerminalSessionRepository(),
+        terminalSessionTtlSeconds = terminalSessionTtlSeconds,
     )
 
     install(ContentNegotiation) {
@@ -87,6 +95,7 @@ fun Application.module() {
         configureWorkspaceRoutes(workspaceService)
         configureRuntimeRoutes(runtimeService)
         configureExecutionRoutes(runtimeService)
+        configureTerminalSessionRoutes(runtimeService)
     }
 
     monitor.subscribe(ApplicationStopping) {

@@ -33,7 +33,61 @@ class MigrationH2Test {
 
     @Test
     fun `flyway applies all migrations on h2`() = withMigratedDatabase { _, result ->
-        assertEquals(8, result.migrationsExecuted)
+        assertEquals(9, result.migrationsExecuted)
+    }
+
+    @Test
+    fun `V9 creates an empty terminal_sessions table with the expected columns`() = withMigratedDatabase { dataSource, _ ->
+        dataSource.connection.use { conn ->
+            conn.createStatement().use { stmt ->
+                stmt.executeQuery(
+                    "SELECT id, runtime_id, token_hash, status, expires_at, consumed_at, created_at, updated_at " +
+                        "FROM terminal_sessions",
+                ).use { rs -> assertTrue(!rs.next(), "fresh terminal_sessions table must be empty") }
+            }
+        }
+    }
+
+    @Test
+    fun `V9 enforces unique token_hash and the status check`() = withMigratedDatabase { dataSource, _ ->
+        dataSource.connection.use { conn ->
+            conn.createStatement().use { stmt ->
+                stmt.executeUpdate(
+                    "INSERT INTO workspaces (id, name, status, created_at, updated_at) " +
+                        "VALUES ('00000000-0000-0000-0000-0000000000a1', 'ts-migration', 'READY', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+                )
+                stmt.executeUpdate(
+                    "INSERT INTO runtime_templates (id, name, image, created_at, updated_at) " +
+                        "VALUES ('ts-template', 'ts', 'example/image:latest', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+                )
+                stmt.executeUpdate(
+                    "INSERT INTO runtimes (id, workspace_id, template_id, status, created_at, updated_at) " +
+                        "VALUES ('00000000-0000-0000-0000-0000000000b1', '00000000-0000-0000-0000-0000000000a1', " +
+                        "'ts-template', 'RUNNING', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+                )
+                stmt.executeUpdate(
+                    "INSERT INTO terminal_sessions (id, runtime_id, token_hash, status, expires_at) " +
+                        "VALUES ('00000000-0000-0000-0000-0000000000c1', '00000000-0000-0000-0000-0000000000b1', " +
+                        "'hash-1', 'ISSUED', CURRENT_TIMESTAMP)",
+                )
+                val duplicateHash = runCatching {
+                    stmt.executeUpdate(
+                        "INSERT INTO terminal_sessions (id, runtime_id, token_hash, status, expires_at) " +
+                            "VALUES ('00000000-0000-0000-0000-0000000000c2', '00000000-0000-0000-0000-0000000000b1', " +
+                            "'hash-1', 'ISSUED', CURRENT_TIMESTAMP)",
+                    )
+                }
+                assertTrue(duplicateHash.isFailure, "duplicate token_hash must be rejected")
+                val unknownStatus = runCatching {
+                    stmt.executeUpdate(
+                        "INSERT INTO terminal_sessions (id, runtime_id, token_hash, status, expires_at) " +
+                            "VALUES ('00000000-0000-0000-0000-0000000000c3', '00000000-0000-0000-0000-0000000000b1', " +
+                            "'hash-3', 'REVOKED', CURRENT_TIMESTAMP)",
+                    )
+                }
+                assertTrue(unknownStatus.isFailure, "status outside ISSUED/CONSUMED/EXPIRED must be rejected")
+            }
+        }
     }
 
     @Test

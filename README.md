@@ -128,6 +128,24 @@ docker build --build-arg MODULE=exkes-api -t exkes-api:local .
 | `GET /v1/runtimes/{rt}/executions?label=<k>=<v>` | 200 | `label` を複数指定可（AND）。同じキーの重複指定は 400 |
 | `POST /v1/runtimes/{rt}/executions/{id}/cancel` | 202 / 200 / 404 | `QUEUED` / `STARTING` / `RUNNING` を `CANCELLING`（取消要求済み・停止未確認）に遷移する。この呼び出しで遷移したら 202、既に `CANCELLING` または終端なら 200 で現状を返す |
 
+#### Terminal session 発行（第5MS）
+
+| Method / Path | 応答 | 説明 |
+|---|---|---|
+| `POST /v1/runtimes/{rt}/terminal-sessions` | 201 / 404 / 409 / 503 | `RUNNING` の Runtime に対し、一回限りの接続トークンを発行する |
+
+- 応答は `{"id", "runtimeId", "status": "ISSUED", "token", "issuedAt", "expiresAt"}`。
+  `token` は **この応答にだけ含まれる平文**（256 bit の乱数、base64url）。以後取得できない。
+  応答は `Cache-Control: no-store`。
+- DB（`terminal_sessions`、Flyway `V9__terminal_sessions.sql`）には SHA-256 の hex のみ保存する。平文は保存もログ出力もしない。
+- トークンは `exkes-terminal-gateway` が消費する（`ISSUED` → `CONSUMED`、一回限り）。期限切れ（`expiresAt` を含む以降）は消費できず、`EXPIRED` になる。
+  本 API は消費しない。gateway 側の接続検証は未実装。
+- 有効期間は `EXKES_TERMINAL_SESSION_TTL_SECONDS`（既定 300 秒、1〜3600）。
+- 404 = 未存在または `DELETED`。409 = `RUNNING` 以外の状態（`CREATING` / `STARTING` / `STOPPING` / `STOPPED` / `FAILED` / `DELETING` 等）。
+  503 = `RUNNING` だが Workspace 配置が未検証、Ready 観測が無い・古い、または TTL 超過（Execution と同じ admission 判定、再試行可能）。
+- `Idempotency-Key` は対象外。再送で同じトークンを返すとトークンを再露出するため、呼び出しごとに新しいセッションを発行する。
+- 発行は `TerminalSessionAudit` ロガーに `sessionId` / `runtimeId` / `workspaceId` / `expiresAt` を info で記録する。
+
 #### 取消の意味（重要）
 
 - `POST .../cancel` の 202 は「取消要求を受け付けた」だけの証明であり、**プロセスが停止した証明ではない**。
@@ -172,6 +190,7 @@ CREATING ──PVC Bound──▶ READY ──▶ ARCHIVED
 | `EXKES_DATABASE_PASSWORD` | DB パスワード | `change-this-in-production` |
 | `EXKES_WORKSPACE_STORAGECLASS` | Workspace PVC の StorageClass | `rook-cephfs` |
 | `EXKES_WORKSPACE_DEFAULT_STORAGE_SIZE_BYTES` | 作成時の既定サイズ（bytes） | `1073741824`（1Gi） |
+| `EXKES_TERMINAL_SESSION_TTL_SECONDS` | Terminal session トークンの有効期間（秒、1〜3600。`exkes-api` のみ） | `300` |
 
 ### `exkes-controller` 専用
 
