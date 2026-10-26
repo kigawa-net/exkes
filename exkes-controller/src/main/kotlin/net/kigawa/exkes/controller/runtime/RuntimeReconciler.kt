@@ -15,16 +15,18 @@ import org.slf4j.LoggerFactory
 /**
  * Polls runtimes in non-terminal states and drives them forward:
  *
- * - CREATING: create Pod -> STARTING
- * - STARTING: wait for Pod Running -> RUNNING
+ * - CREATING: create Pod + its ClusterIP Service (name = Pod name) -> STARTING.
+ *   The Service is created after the Pod, so it never exists without the Pod it selects.
+ * - STARTING: ensure the Service (restart recreates the Pod), wait for Pod Running -> RUNNING
  * - RUNNING: monitor for Pod failure/TTL expiry -> FAILED/EXPIRED;
  *   Pod NotReady for longer than [notReadyGraceSeconds] -> DEGRADED
  * - DEGRADED: Pod Ready again -> RUNNING; Pod loss -> FAILED; TTL -> EXPIRED
- * - STOPPING: delete Pod -> STOPPED
+ * - STOPPING: delete Service and Pod -> STOPPED (the Service goes first, so the gateway
+ *   stops routing to the Runtime before its Pod terminates)
  * - STOPPED: (idle, can be restarted via STARTING)
  * - FAILED: (terminal, can only go to DELETING)
  * - EXPIRED: (TTL expiry, transitions to DELETING)
- * - DELETING: delete Pod -> DELETED
+ * - DELETING: delete Service and Pod -> DELETED
  *
  * This loop runs in exkes-controller, the only Control Plane process that holds
  * Kubernetes credentials. exkes-api writes desired state to MariaDB and nothing else.
@@ -132,6 +134,9 @@ class RuntimeReconciler(
 
             try {
                 val podName = provisioner.createRuntime(runtime)
+                // Before pod_name is recorded: a failure here retries CREATING, and the retry
+                // adopts the Pod (409 path) and ensures the Service again.
+                provisioner.ensureService(runtime)
                 if (!runtimeRepository.setPodName(runtime.id, podName)) {
                     logger.info("skipped pod_name update for runtime {} (no longer CREATING)", runtime.id)
                 }
@@ -167,6 +172,7 @@ class RuntimeReconciler(
             try {
                 // Recreates the Pod if it is gone (restart after stop); no-op otherwise.
                 provisioner.startRuntime(runtime)
+                provisioner.ensureService(runtime)
                 val status = provisioner.getRuntimeStatus(runtime)
                 when (status) {
                     RuntimeStatus.RUNNING -> {
@@ -367,7 +373,10 @@ class RuntimeReconciler(
     private fun processStopping(runtimes: List<Runtime>) {
         for (runtime in runtimes) {
             try {
-                if (provisioner.stopRuntime(runtime)) {
+                // Both calls run every cycle; the transition waits until both are confirmed.
+                val serviceGone = provisioner.deleteService(runtime)
+                val podGone = provisioner.stopRuntime(runtime)
+                if (serviceGone && podGone) {
                     if (runtimeRepository.transition(runtime.id, RuntimeStatus.STOPPING, RuntimeStatus.STOPPED)) {
                         attempts.remove(runtime.id)
                         logger.info("runtime {} is STOPPED", runtime.id)
@@ -402,7 +411,10 @@ class RuntimeReconciler(
     private fun processDeleting(runtimes: List<Runtime>) {
         for (runtime in runtimes) {
             try {
-                if (provisioner.deleteRuntime(runtime)) {
+                // Both calls run every cycle; the transition waits until both are confirmed.
+                val serviceGone = provisioner.deleteService(runtime)
+                val podGone = provisioner.deleteRuntime(runtime)
+                if (serviceGone && podGone) {
                     if (runtimeRepository.transition(runtime.id, RuntimeStatus.DELETING, RuntimeStatus.DELETED)) {
                         attempts.remove(runtime.id)
                         logger.info("runtime {} is DELETED", runtime.id)

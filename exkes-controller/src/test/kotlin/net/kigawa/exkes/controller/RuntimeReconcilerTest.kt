@@ -82,6 +82,30 @@ class RuntimeReconcilerTest {
         }
 
         override fun streamRuntimeLogs(runtime: Runtime): String = ""
+
+        /** Service name -> owning runtime id; models the Services exkes created (Service name = Pod name). */
+        val services = mutableMapOf<String, String>()
+        var serviceCreateFailures = 0
+        var serviceDeleteFailures = 0
+
+        override fun ensureService(runtime: Runtime) {
+            if (serviceCreateFailures > 0) {
+                serviceCreateFailures--
+                throw RuntimeException("service boom")
+            }
+            services.putIfAbsent(resolvePodName(runtime), runtime.id)
+        }
+
+        /** Deletes only a Service owned by [runtime]; a foreign Service is left untouched. */
+        override fun deleteService(runtime: Runtime): Boolean {
+            if (serviceDeleteFailures > 0) {
+                serviceDeleteFailures--
+                throw RuntimeException("service delete boom")
+            }
+            val name = resolvePodName(runtime)
+            if (services[name] == runtime.id) services.remove(name)
+            return true
+        }
     }
 
     private val provisioner = FakeProvisioner()
@@ -572,5 +596,103 @@ class RuntimeReconcilerTest {
         assertFalse(isPodOwnedBy(pod("exkes.runtime-id" to "rt-1"), "rt-1"))
         assertFalse(isPodOwnedBy(pod("app.kubernetes.io/managed-by" to "someone-else", "exkes.runtime-id" to "rt-1"), "rt-1"))
         assertFalse(isPodOwnedBy(V1Pod(), "rt-1"))
+    }
+
+    @Test
+    fun `creating runtime gets a Service named after its Pod that is kept while running`() {
+        val rt = newRuntime()
+        reconciler.reconcileOnce()
+        val podName = Runtime.podNameFor(rt.id)
+        assertEquals(RuntimeStatus.STARTING, status(rt.id))
+        assertEquals(podName, runtimes.findById(rt.id)!!.podName)
+        assertEquals(rt.id, provisioner.services[podName])
+        reconciler.reconcileOnce()
+        assertEquals(RuntimeStatus.RUNNING, status(rt.id))
+        assertEquals(rt.id, provisioner.services[podName])
+    }
+
+    @Test
+    fun `starting cycles ensure the Service without creating a duplicate`() {
+        val rt = newRuntime()
+        provisioner.podStatus = RuntimeStatus.STARTING
+        repeat(3) { reconciler.reconcileOnce() }
+        assertEquals(RuntimeStatus.STARTING, status(rt.id))
+        assertEquals(mapOf(Runtime.podNameFor(rt.id) to rt.id), provisioner.services)
+    }
+
+    @Test
+    fun `Service failure keeps the runtime creating and the retry adopts the same Pod`() {
+        val rt = newRuntime()
+        provisioner.serviceCreateFailures = 1
+        reconciler.reconcileOnce()
+        assertEquals(RuntimeStatus.CREATING, status(rt.id))
+        assertNull(runtimes.findById(rt.id)!!.podName)
+        reconciler.reconcileOnce()
+        assertEquals(RuntimeStatus.STARTING, status(rt.id))
+        assertEquals(1, provisioner.pods.size)
+        assertEquals(rt.id, provisioner.services[Runtime.podNameFor(rt.id)])
+    }
+
+    @Test
+    fun `stop removes the Service together with the Pod`() {
+        val rt = newRuntime()
+        runToRunning(rt)
+        assertEquals(1, provisioner.services.size)
+        runtimes.transition(rt.id, RuntimeStatus.RUNNING, RuntimeStatus.STOPPING)
+        reconciler.reconcileOnce()
+        assertEquals(RuntimeStatus.STOPPED, status(rt.id))
+        assertTrue(provisioner.pods.isEmpty())
+        assertTrue(provisioner.services.isEmpty())
+    }
+
+    @Test
+    fun `stopping waits until the Service deletion is confirmed`() {
+        val rt = newRuntime()
+        runToRunning(rt)
+        runtimes.transition(rt.id, RuntimeStatus.RUNNING, RuntimeStatus.STOPPING)
+        provisioner.serviceDeleteFailures = 1
+        reconciler.reconcileOnce()
+        assertEquals(RuntimeStatus.STOPPING, status(rt.id))
+        reconciler.reconcileOnce()
+        assertEquals(RuntimeStatus.STOPPED, status(rt.id))
+        assertTrue(provisioner.services.isEmpty())
+    }
+
+    @Test
+    fun `stopping succeeds when the Service is already absent`() {
+        val rt = newRuntime()
+        runToRunning(rt)
+        provisioner.services.clear()
+        runtimes.transition(rt.id, RuntimeStatus.RUNNING, RuntimeStatus.STOPPING)
+        reconciler.reconcileOnce()
+        assertEquals(RuntimeStatus.STOPPED, status(rt.id))
+    }
+
+    @Test
+    fun `failed runtime whose Pod vanished still has its orphan Service removed on delete`() {
+        val rt = newRuntime()
+        runToRunning(rt)
+        provisioner.pods.clear()
+        reconciler.reconcileOnce()
+        assertEquals(RuntimeStatus.FAILED, status(rt.id))
+        assertEquals(1, provisioner.services.size)
+        assertTrue(runtimes.transition(rt.id, RuntimeStatus.FAILED, RuntimeStatus.DELETING))
+        reconciler.reconcileOnce()
+        assertEquals(RuntimeStatus.DELETED, status(rt.id))
+        assertTrue(provisioner.services.isEmpty())
+    }
+
+    @Test
+    fun `stopping one runtime leaves another runtime's Service and Pod untouched`() {
+        val stopped = newRuntime()
+        val kept = newRuntime()
+        runToRunning(stopped)
+        runToRunning(kept)
+        runtimes.transition(stopped.id, RuntimeStatus.RUNNING, RuntimeStatus.STOPPING)
+        reconciler.reconcileOnce()
+        assertEquals(RuntimeStatus.STOPPED, status(stopped.id))
+        assertEquals(RuntimeStatus.RUNNING, status(kept.id))
+        assertEquals(mapOf(Runtime.podNameFor(kept.id) to kept.id), provisioner.services)
+        assertEquals(setOf(Runtime.podNameFor(kept.id)), provisioner.pods)
     }
 }

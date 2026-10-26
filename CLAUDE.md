@@ -49,6 +49,9 @@ docker compose up -d        # ローカルスタック（mariadb + exkes-api + e
   その 1 行に留める（`kigawa-net/platform` PR #16 の `exkes-controller-workspace-pvc`
   がこの方針）。`pods` / `deployments` / `networkpolicies` は第2MS で
   実装と同時に 1 行ずつ追加する。
+  Runtime 用の ClusterIP Service（`services`、verbs は get / create / delete のみ）は
+  `RuntimeService.kt` の実装と同じ PR で sandbox namespace の Role に 1 行追加する
+  （差分案は `docs/implementation-plan.md` 9.5.1）。
 - DI フレームワークは使わない。`Application.module()` 内で
   repository → service（api）/ repository → provisioner → reconciler（controller）の
   順に生成して渡す（kigawa-net の慣行）。
