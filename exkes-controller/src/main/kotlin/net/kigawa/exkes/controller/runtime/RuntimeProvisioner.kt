@@ -29,6 +29,18 @@ interface RuntimeProvisioner {
     /** Streams logs from the Runtime's Pod. */
     fun streamRuntimeLogs(runtime: Runtime): String
 
+    /**
+     * Creates the ClusterIP Service for a Runtime (name = Pod name) that selects only its Pod,
+     * or verifies the existing one. Idempotent. Call after [createRuntime] / [startRuntime].
+     */
+    fun ensureService(runtime: Runtime)
+
+    /**
+     * Deletes the Runtime's Service. Returns true when nothing of the Runtime's Service remains
+     * (already absent counts as deleted).
+     */
+    fun deleteService(runtime: Runtime): Boolean
+
     /** The Pod name derived from the runtime ID (deterministic). */
     fun resolvePodName(runtime: Runtime): String = Runtime.podNameFor(runtime.id)
 }

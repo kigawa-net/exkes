@@ -933,8 +933,9 @@ rules:
     verbs: ["get", "list", "watch", "create", "delete"]
   # ↓ 第2MS（Runtime）で必要になった時点で追加する。**第1MSでは付けない**
   #   - apiGroups: [""]
-  #     resources: ["pods", "services", "secrets", "events"]
+  #     resources: ["pods", "secrets", "events"]
   #     verbs: ["create", "get", "list", "watch", "delete"]
+  # Runtime Service（rt-<id>）は 9.5.1 の差分案を参照。`services` は get/create/delete の 3 verb だけ。
   #   - apiGroups: ["apps"]
   #     resources: ["deployments"]
   #     verbs: ["create", "get", "list", "watch", "delete", "update", "patch"]
@@ -961,6 +962,51 @@ subjects: [{ kind: ServiceAccount, name: exkes-controller }]
 > （`directory.recurse` で拾われる）。cross-namespace を1つの RoleBinding で束ねると
 > `subjects[].namespace` の指定が必要になり、Argo CD の宛先 namespace と
 > 食い違いやすくなるため、第1MSでは意図的に同一 namespace 内に閉じている。
+
+#### 9.5.1 Runtime Service の RBAC 差分案（`kigawa-net/platform` は未変更）
+
+`exkes-controller` は Runtime の Pod と同じ namespace（sandbox namespace）に、Pod 名と同じ名前の
+ClusterIP Service を作る（実装: `exkes-controller/.../runtime/RuntimeService.kt`）。
+このために触る resource は `services` だけで、使う verb は次の 3 つ（list / watch は使わない）。
+
+```yaml
+# exkes/{stg,main}/rbac.yaml の Role（sandbox namespace 側）に 1 rule 追加
+rules:
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "create", "delete"]   # 既存
+  - apiGroups: [""]
+    resources: ["services"]                              # 追加（Runtime Service）
+    verbs: ["get", "create", "delete"]
+```
+
+- 既存の Role 名 `exkes-controller-workspace-pvc` は PVC 専用の名前になるが、名前の変更は今回の差分に含めない（必要なら別 PR）。
+- Service は sandbox namespace の中だけを操作する。cross-namespace の権限は不要。
+- `pods` の権限は 9.5 のとおり第2MS の Runtime Pod 対応で別途必要（この差分の対象外）。
+
+**Service の仕様**（`buildRuntimeService`）
+
+| 項目 | 値 |
+|---|---|
+| name | `rt-<runtime id>`（`runtimes.pod_name` と同じ。gateway の `ws://{podName}.<ns>.svc.cluster.local:8080/terminal` の前提） |
+| namespace | Runtime の resource namespace（sandbox） |
+| labels | Pod と同じ system labels（`app.kubernetes.io/managed-by=exkes`, `exkes.runtime-id`, `exkes.workspace-id`, `exkes.template-id`） |
+| type | `ClusterIP` |
+| selector | `app.kubernetes.io/managed-by=exkes` かつ `exkes.runtime-id=<runtime id>`（当該 Runtime の Pod だけを選ぶ） |
+| ports | 1 つ: `name: agent`, `protocol: TCP`, `port: 8080`, `targetPort: 8080`（runtime-agent の待ち受け） |
+
+**作成・削除のタイミング**
+
+- 作成（`ensureService`）: CREATING で Pod を作成した直後、`pod_name` を記録する前。STARTING のたびにも呼ぶ（STOPPED からの再起動で Pod を作り直すため）。
+  - Pod を先に作る理由: Service は Pod を選ぶだけなので、Pod より先に作っても害は無いが、Pod 作成が失敗したときに孤児 Service を増やさない。
+  - Pod 作成後に Service 作成が失敗した場合は CREATING のまま次サイクルへ回り、再試行では 409 で Pod を採用したうえで Service を再確認する（Pod は 2 つにならない）。
+  - gateway が Runtime に到達できるのは RUNNING（Ready 観測あり）のときだけなので、STARTING 中に Service が存在しても外部から使われない。
+- 作成時の既存 Service の扱い（409 / 競合）: 読み直して **所有ラベルと仕様（type / selector / port）が完全一致する場合だけ採用**する。不一致は例外（FAILED への遷移は試行回数の上限で起きる）。別 Runtime や手動で作られた同名 Service は上書きしない。
+- 削除（`deleteService`）: STOPPING と DELETING の各サイクルで Pod の削除と並行して呼ぶ。**Service を先に消す**（gateway がルーティングを止めてから Pod を終了させるため）。
+  - Service と Pod の両方が確認できたときだけ STOPPED / DELETED へ遷移する（片方だけ残って孤児化しないため）。
+  - 既に無い場合は成功扱い。所有ラベルが一致しない同名の Service は消さずに成功扱い（他者のオブジェクトを消さない）。
+  - 削除は取得した UID を precondition にした DELETE（TOCTOU で別の Service を消さないため。PVC と同じ流儀）。
+  - FAILED / EXPIRED は DELETING を経由するので、Pod が既に無くなった場合でも Service は DELETING で消える。
 
 ### 9.6 `exkes/{stg,main}/sandbox-ns.yaml` と `network-policy.yaml`
 

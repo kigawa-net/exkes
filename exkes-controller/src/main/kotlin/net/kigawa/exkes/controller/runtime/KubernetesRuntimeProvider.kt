@@ -41,8 +41,11 @@ import org.slf4j.LoggerFactory
  * - Environment variables from RuntimeSpec or template defaults
  * - SecurityContext: non-root, readOnlyRootFilesystem, drop ALL capabilities, seccomp RuntimeDefault
  *
+ * Also manages the Runtime's ClusterIP Service (see [RuntimeServiceManager]): name = Pod name,
+ * selects only that Pod, port 8080 -> runtime-agent.
+ *
  * The controller's ServiceAccount must have Pod create/get/list/watch/delete permissions
- * in the Sandbox namespace (issue #2 "Controller RBAC").
+ * and Service get/create/delete permissions in the Sandbox namespace (issue #2 "Controller RBAC").
  */
 class KubernetesRuntimeProvider(
     private val kubernetesConfig: KubernetesConfig,
@@ -55,6 +58,13 @@ class KubernetesRuntimeProvider(
 
     private val api: CoreV1Api by lazy { CoreV1Api(KubernetesClientFactory.createClient(kubernetesConfig)) }
     private val namespace: String = kubernetesConfig.resourceNamespace
+    private val services: RuntimeServiceManager by lazy {
+        RuntimeServiceManager(CoreV1RuntimeServiceStore(api, namespace))
+    }
+
+    override fun ensureService(runtime: Runtime) = services.ensure(runtime)
+
+    override fun deleteService(runtime: Runtime): Boolean = services.delete(runtime)
 
     override fun createRuntime(runtime: Runtime): String {
         val workspace = verifiedWorkspace(runtime)
@@ -186,12 +196,7 @@ class KubernetesRuntimeProvider(
                         // Defense in depth for older rows: system-owned identity wins
                         // even if unvalidated client labels already exist in MariaDB.
                         (runtime.labelsJson?.let { json.decodeFromString<Map<String, String>>(it) } ?: emptyMap()) +
-                            mapOf(
-                                "app.kubernetes.io/managed-by" to "exkes",
-                                "exkes.runtime-id" to runtime.id,
-                                "exkes.workspace-id" to runtime.workspaceId,
-                                "exkes.template-id" to runtime.templateId,
-                            ),
+                            runtimeSystemLabels(runtime),
                     ),
             )
             .spec(spec)
