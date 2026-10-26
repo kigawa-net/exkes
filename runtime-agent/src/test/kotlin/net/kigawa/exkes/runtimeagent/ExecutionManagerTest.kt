@@ -28,6 +28,7 @@ import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import kotlin.test.fail
 import net.kigawa.exkes.runtimeagent.execution.ExecutionLog
 import java.time.Instant
 
@@ -255,10 +256,9 @@ class ExecutionManagerTest {
         val first = manager(FileExecutionStore(dir))
         first.start(sh("sleep 30 & echo \$! > child.pid; wait", "gc1", dir = work.toString()))
         first.await("gc1", ExecutionStatus.RUNNING)
+        // `echo $! > child.pid` may still be writing: wait for the complete line, not just the file.
         val pidFile = work.resolve("child.pid")
-        val deadline = System.currentTimeMillis() + 5_000
-        while (!Files.exists(pidFile) && System.currentTimeMillis() < deadline) Thread.sleep(20)
-        val grandchild = Files.readString(pidFile).trim().toLong()
+        val grandchild = awaitPidFile(pidFile, timeoutMillis = 15_000)
         assertTrue(SystemProcessControl.isAlive(grandchild))
 
         // Simulate a crash: the old manager never runs shutdown(). The new agent must stop the tree first.
@@ -266,6 +266,18 @@ class ExecutionManagerTest {
         second.recover()
         assertEquals(ExecutionStatus.FAILED, second.get("gc1").status)
         assertFalse(SystemProcessControl.isAlive(grandchild), "grandchild must not survive the restart")
+    }
+
+    /** Waits until [file] holds one complete line with a pid (ends with a newline and parses as a number). */
+    private fun awaitPidFile(file: java.nio.file.Path, timeoutMillis: Long): Long {
+        val deadline = System.currentTimeMillis() + timeoutMillis
+        while (System.currentTimeMillis() < deadline) {
+            val text = if (Files.exists(file)) Files.readString(file) else ""
+            val pid = text.trim().toLongOrNull()
+            if (pid != null && text.endsWith("\n")) return pid
+            Thread.sleep(20)
+        }
+        fail("pid file $file was not written completely within ${timeoutMillis}ms")
     }
 
     @Test
