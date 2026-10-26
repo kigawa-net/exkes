@@ -18,7 +18,19 @@ dependencies {
     implementation(libs.ktor.server.status.pages)
     implementation(libs.ktor.serialization.kotlinx.json)
     implementation(libs.kotlinx.serialization.json)
+    implementation(libs.ktor.server.websockets)
     implementation(libs.logback.classic)
+    // PTY. pty4j's kotlin-stdlib dependency is excluded: the project pins the stdlib
+    // through the Kotlin plugin, and a newer transitive stdlib would not be readable
+    // by the 2.1.x compiler.
+    implementation(libs.pty4j) {
+        exclude(group = "org.jetbrains.kotlin")
+    }
+    // Process-group signalling (kill(-pgid, SIGKILL)). pty4j already needs it at runtime.
+    implementation(libs.jna)
 
     testImplementation(libs.ktor.server.test.host)
+    testImplementation(libs.ktor.client.core)
+    testImplementation(libs.ktor.client.cio)
+    testImplementation(libs.ktor.client.websockets)
 }
