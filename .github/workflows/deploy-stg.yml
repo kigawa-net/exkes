@@ -27,9 +27,11 @@ env:
   HARBOR_USER: robot$kigawa-net
   MANIFEST_REPOSITORY: kigawa-net/platform
   MANIFEST_DIR: exkes/stg
-  # build ジョブの matrix と必ず同じ内容にする。issue #2 の対象モジュールは
-  # exkes-api と exkes-controller の 2 つだけ
-  #（exkes-terminal-gateway / runtime-agent は issue #2「対象外」）。
+  # 更新対象（platform の exkes/stg/<module>.yaml の Deployment image を書き換える）。
+  # Deployment を持つ control plane モジュールだけを列挙する。build の matrix とは
+  # 別物で、matrix にだけ居るモジュール（runtime-agent: Deployment を持たず、
+  # runtime_templates.image / Runtime Pod の sidecar として使われる）はここに入れない。
+  # 追加手順は CLAUDE.md「モジュール構成」を参照。
   MODULES: exkes-api exkes-controller
 
 jobs:
@@ -58,9 +60,18 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        module:
-          - exkes-api
-          - exkes-controller
+        # module: Dockerfile の MODULE build-arg（Gradle モジュール名）。
+        # image: Harbor のリポジトリ名。既存は module と同名、runtime-agent だけ
+        #   exkes- 接頭辞付き（harbor.kigawa.net/private/exkes-runtime-agent）。
+        # runtime-agent は build / push のみ。platform の manifest 更新は行わない
+        # （上の MODULES に入れない）。tag は他モジュールと同じ main-<sha>。
+        include:
+          - module: exkes-api
+            image: exkes-api
+          - module: exkes-controller
+            image: exkes-controller
+          - module: runtime-agent
+            image: exkes-runtime-agent
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
     steps:
@@ -87,7 +98,7 @@ jobs:
           file: Dockerfile
           build-args: MODULE=${{ matrix.module }}
           push: true
-          tags: ${{ env.HARBOR_REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.module }}:${{ steps.tag.outputs.tag }}
+          tags: ${{ env.HARBOR_REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.image }}:${{ steps.tag.outputs.tag }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 

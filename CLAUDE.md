@@ -38,7 +38,18 @@ docker compose up -d        # ローカルスタック（mariadb + exkes-api + e
 
   > 4〜6 の 3 箇所を同期し忘れると「stg には manifest が無いのに push される」/
   > 「build はするのに image 更新されない」といった取りこぼしが起きる。issue #2 で
-  > 対象となっているのは `exkes-api` と `exkes-controller` の 2 つだけ。
+  > Deployment を持つ control plane モジュールは `exkes-api` と `exkes-controller` の 2 つ。
+  >
+  > **Deployment を持たないモジュール**（例: `runtime-agent`。Runtime Pod の sidecar /
+  > `runtime_templates.image` が参照する image）は扱いが違う:
+  > - 手順 4（build の matrix）にだけ追加する。matrix の `image:` は Harbor のリポジトリ名
+  >   （`exkes-runtime-agent`）で、module 名と違う場合はここで対応付ける。
+  > - 手順 5・6（`MODULES`）には**入れない**。`MODULES` は platform の manifest の
+  >   Deployment image を書き換える対象の列挙であり、manifest が無いと `::error::` で
+  >   取りこぼしになる。
+  > - 手順 7 の platform manifest も不要。image の参照先（controller の
+  >   `EXKES_RUNTIME_AGENT_IMAGE`、template の `image`）は別途設定する。
+  > - tag は他モジュールと同じ `main-<sha>`。deploy-prod.yml は昇格しない（stg manifest が無い）。
 - **`runtime-agent` は `exkes-common` に依存させない**（plan 第3章）。
   Sandbox 側は JSON over HTTP/WebSocket だけで通信し、制御平面のコードを
   リンクしない。
