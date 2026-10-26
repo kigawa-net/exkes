@@ -1,6 +1,5 @@
 package net.kigawa.exkes.api.runtime
 
-import java.time.Duration
 import java.time.Instant
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -23,6 +22,7 @@ import net.kigawa.exkes.common.domain.Execution
 import net.kigawa.exkes.common.domain.ExecutionStatus
 import net.kigawa.exkes.common.domain.ExecutionType
 import net.kigawa.exkes.common.domain.Runtime
+import net.kigawa.exkes.common.domain.RuntimeAdmission
 import net.kigawa.exkes.common.domain.RuntimeStatus
 import net.kigawa.exkes.common.domain.RuntimeTemplate
 import net.kigawa.exkes.common.domain.TerminalSession
@@ -467,31 +467,11 @@ class RuntimeService(
      * have turned NotReady since the last observation.
      */
     private fun admitRuntime(runtime: Runtime) {
-        val runtimeId = runtime.id
-        // A fresh Pod Ready timestamp does not prove that the Workspace PVC
-        // is still attached/verified. This is an additional fail-closed guard;
-        // atomic generation-fenced admission is tracked in #50/#52.
+        // The rule itself lives in RuntimeAdmission (exkes-common) so that
+        // exkes-terminal-gateway applies the identical check.
         val workspace = workspaceRepository.findById(runtime.workspaceId)
-        if (workspace?.canAttachRuntime() != true) {
-            throw RuntimeNotAdmittingException(runtimeId, "Workspace PVC placement is not verified")
-        }
-        // Require a fresh Ready observation. Compare full Duration values: Duration.seconds
-        // truncates, so 15.9999s would read as 15s and a stale observation could still be
-        // admitted at the boundary.
-        val now = clock()
-        val readyAt = runtime.lastReadyObservedAt
-            ?: throw RuntimeNotAdmittingException(runtimeId, "no Ready observation")
-        if (Duration.between(readyAt, now) > Duration.ofSeconds(admissionFreshnessSeconds)) {
-            throw RuntimeNotAdmittingException(runtimeId, "last Ready observation is stale")
-        }
-        if (readyAt.isAfter(now.plusSeconds(admissionFreshnessSeconds))) {
-            throw RuntimeNotAdmittingException(runtimeId, "Ready observation is in the future")
-        }
-        // Same TTL rule as the controller: a runtime past its TTL must not start new work
-        // while the controller has not yet moved it to EXPIRED.
-        val ttl = runtime.ttlSeconds
-        if (ttl != null && ttl > 0 && Duration.between(runtime.createdAt, now) >= Duration.ofSeconds(ttl.toLong())) {
-            throw RuntimeNotAdmittingException(runtimeId, "TTL has expired")
+        RuntimeAdmission.denialReason(runtime, workspace, clock(), admissionFreshnessSeconds)?.let {
+            throw RuntimeNotAdmittingException(runtime.id, it)
         }
     }
 
