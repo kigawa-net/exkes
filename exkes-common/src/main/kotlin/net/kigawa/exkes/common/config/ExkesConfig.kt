@@ -19,7 +19,16 @@ data class DatabaseConfig(
     val jdbcUrl: String,
     val user: String,
     val password: String,
-)
+) {
+    companion object {
+        /** Reads `exkes.database.*`. Shared by every process that talks to MariaDB. */
+        fun fromConfig(config: ApplicationConfig): DatabaseConfig = DatabaseConfig(
+            jdbcUrl = config.property("exkes.database.jdbcUrl").getString(),
+            user = config.property("exkes.database.user").getString(),
+            password = config.property("exkes.database.password").getString(),
+        )
+    }
+}
 
 data class WorkspaceConfig(
     val storageClass: String,
@@ -34,11 +43,7 @@ data class ExkesConfig(
         fun fromApplication(application: Application): ExkesConfig = fromConfig(application.environment.config)
 
         fun fromConfig(config: ApplicationConfig): ExkesConfig = ExkesConfig(
-            database = DatabaseConfig(
-                jdbcUrl = config.property("exkes.database.jdbcUrl").getString(),
-                user = config.property("exkes.database.user").getString(),
-                password = config.property("exkes.database.password").getString(),
-            ),
+            database = DatabaseConfig.fromConfig(config),
             workspace = WorkspaceConfig(
                 storageClass = config.property("exkes.workspace.storageClass").getString(),
                 defaultStorageSizeBytes = config.property("exkes.workspace.defaultStorageSizeBytes")

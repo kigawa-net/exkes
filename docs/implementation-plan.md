@@ -114,7 +114,7 @@ issue #1 のアーキテクチャを踏襲しつつ、4 コンポーネントの
 │  … PVC(ws-<id>) 作成/削除・Runtime Pod 作成/削除・NetworkPolicy・Resource 制限・│
 │    一時 Secret・TTL 監視・障害検出/再作成                                      │
 │  … **Kubernetes 権限を持つのはこのプロセスだけ**（issue #2「Controller RBAC」）│
-│ exkes-terminal-gateway（第5MS〜、issue #2 対象外・スケルトンのまま）:          │
+│ exkes-terminal-gateway（第5MS、実装済み・CI 対象外）:                          │
 │  WebSocket relay / session validation / session TTL / audit                   │
 │ Ceph RGW（S3、第4MS〜）: Execution log / Artifact                              │
 └──────────────────────────────┬────────────────────────────────────────────────┘
@@ -216,7 +216,7 @@ exkes/
 │           └── WorkspaceReconciler.kt             # CREATING/DELETING 行の処理ループ
 │   ├── src/main/resources/application.conf / logback.xml
 │   └── src/test/kotlin/...              # reconciler の状態機械テスト（fake provisioner）
-├── exkes-terminal-gateway/          # スケルトンのみ。**issue #2 対象外**（第5MS）
+├── exkes-terminal-gateway/          # 第5MS 実装済み（relay / 認証 / 監査）。CI 対象外（docs/terminal-gateway.md）
 ├── runtime-agent/                   # スケルトンのみ。**issue #2 対象外**（第3MS、common 非依存）
 ├── Dockerfile                       # ARG MODULE で各モジュール共用（installDist 方式）
 ├── docker-compose.yml               # ローカル開発用 mariadb:11 + exkes-api + exkes-controller
@@ -244,7 +244,7 @@ exkes/
 | `exkes-common` | domain / DB (Exposed + Flyway) / 設定。**client-java 非依存** | （外部依存のみ） | なし（ライブラリ） | なし |
 | `exkes-api` | REST API。desired state（CREATING 行 / DELETING 遷移）だけを書く。**Kubernetes API を呼ばない** | `exkes-common` | `io.ktor.server.netty.EngineMain` | `private/exkes-api:main-<sha>` |
 | `exkes-controller` | reconciliation ループ。**PVC / Pod / Secret / Service / NetworkPolicy の権限のみ**（issue #2） | `exkes-common` + client-java | 同上 | `private/exkes-controller:main-<sha>` |
-| `exkes-terminal-gateway` | WebSocket relay（第5MS〜）。issue #2 対象外 | `exkes-common` | 同上 | **なし**（issue #2 対象外） |
+| `exkes-terminal-gateway` | WebSocket relay。単回使用 token の検証・Runtime 再検証・relay・TTL・監査（第5MS、実装済み。詳細は `docs/terminal-gateway.md`）。**migrate は実行しない**。Kubernetes API は呼ばない | `exkes-common` | 同上 | **なし**（issue #2 対象外。CI 対象化の手順は `docs/terminal-gateway.md`） |
 | `runtime-agent` | Sandbox 内 Process/PTY/Execution 管理（第3MS〜）。issue #2 対象外 | **common 非依存**（JSON のみ） | 同上 | **なし**（issue #2 対象外） |
 
 ### 3.2 設計メモ
@@ -258,6 +258,8 @@ exkes/
   再起動する構成になり、**先に立ち上がった側が動けるように migrate を両方で行う**ことに
   した。Flyway は `flyway_schema_history` で run を 직列化するので衝突は起きにくい。
   もし将来これが問題になった場合は「片方から削除」ではなく専用 migration job を用意する。
+  `exkes-terminal-gateway` は migrate しない（スキーマを所有せず、api / controller の後に
+  立つ前提でも動く必要が無いため。理由は `docs/terminal-gateway.md`）。
 - **ブロッキング JDBC は Netty のイベントループで走らせない**。`WorkspaceService` の
   公開メソッドは全て `suspend` で、内部で `withContext(Dispatchers.IO)` する。
   Exposed の `transaction {}` はスレッドをブロックするため、これが無いと 1 リクエストで
@@ -1111,7 +1113,7 @@ issue #1 / #2 は「Epic + 子 issue」に再構成された。10.1 / 10.2 章�
 | #13 `feat: define public API and authentication/authorization` | Runtime / Execution API、認証 | 未着手。認証（Keycloak OIDC）は MVP 後続フェーズ（第1.2章・第12章#9） |
 | #14 / #17 | Runtime Template / Credential 配送 | 未着手（第2MS / 第4MS） |
 | #10 `security: isolate sandbox runtimes` | NetworkPolicy default deny | **default-deny の定義のみ issue #2 相当で前倒し済**（`network-policy.yaml`）。Pod が無いので実効なし。sandbox 隔離の実装・E2E 検証は #10 の領分 |
-| #8 / #11 / #12 / #9 | runtime-agent / Execution / RGW / Terminal / Agent | 未着手（第3〜5MS）。`runtime-agent` / `exkes-terminal-gateway` はスケルトンのみ |
+| #8 / #11 / #12 / #9 | runtime-agent / Execution / RGW / Terminal / Agent | 未着手（第3〜5MS）。`exkes-terminal-gateway` は第5MS の relay / 認証 / 監査を実装（CI 対象外。`docs/terminal-gateway.md`）。`runtime-agent` はスケルトンのまま |
 | #15 / #16 | Metrics / E2E | 未着手（第6MS） |
 
 > **本 MS で issue のチェックボックスを閉じられるか**: #3 / #4 / #6 は
@@ -1154,7 +1156,7 @@ PR で提出するファイル一覧（具体的）。
 - [ ] `exkes-controller/src/main/resources/application.conf`（`kubernetes` / `reconciler` section あり） / `logback.xml`
 - [ ] `exkes-controller/src/test/kotlin/.../WorkspaceReconcilerTest.kt`（fake provisioner + timeout 系を含む）
 - [ ] `exkes-common/src/test/kotlin/.../MigrationH2Test.kt` / `db/WorkspaceRepositoryTest.kt`
-- [ ] `exkes-terminal-gateway/` / `runtime-agent/` の各 `build.gradle.kts` + `Application.kt`（**スケルトンのまま。issue #2 対象外**）
+- [ ] `exkes-terminal-gateway/` / `runtime-agent/` の各 `build.gradle.kts` + `Application.kt`（**issue #2 対象外。gateway は第5MS で実装済み、runtime-agent はスケルトンのまま**）
 - [ ] `Dockerfile`（`ARG MODULE`、`installDist` 方式、temurin 21 JRE）
 - [ ] `.dockerignore`
 - [ ] `docker-compose.yml`（mariadb:11 + `exkes-api` + `exkes-controller`）

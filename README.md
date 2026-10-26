@@ -21,7 +21,7 @@ Gradle マルチモジュール monorepo。モジュールは「制御平面の�
 | `exkes-common` | 設定 / DB (Exposed + Flyway) / Workspace domain。**Kubernetes client 非依存** | 外部のみ | 第1MS 実装済 |
 | `exkes-api` | REST API (`/v1/workspaces`)。desired state だけを書く | `exkes-common` | 第1MS 実装済 |
 | `exkes-controller` | Desired State と K8s 実状態の reconciliation。**Kubernetes 権限を持つ唯一のプロセス** | `exkes-common` + client-java | 第1MS 実装済（Workspace のみ） |
-| `exkes-terminal-gateway` | WebSocket による Terminal relay | `exkes-common` | スケルトン（第5MS・issue #2 対象外） |
+| `exkes-terminal-gateway` | WebSocket による Terminal relay（単回使用 token 検証・Runtime 再検証・TTL・監査） | `exkes-common` | 第5MS 実装済（CI 対象外。詳細は [docs/terminal-gateway.md](docs/terminal-gateway.md)） |
 | `runtime-agent` | Runtime Pod 内の Process / PTY / Execution 管理 | **common 非依存** | スケルトン（第3MS・issue #2 対象外） |
 
 `exkes-api` は Kubernetes API を一切呼ばない。Deployment で
@@ -105,6 +105,13 @@ docker build --build-arg MODULE=exkes-api -t exkes-api:local .
 | `GET /v1/workspaces/{id}` | 200 / 404 | 単体取得（`DELETED` は 404） |
 | `DELETE /v1/workspaces/{id}` | 202 / 404 / 409 | 削除要求（`DELETING` へ遷移、PVC 削除は非同期）。404 = 未存在/削除済み、409 = 競合書き込みで条件付き UPDATE が 3 回とも失敗 |
 | `GET /health` | 200 | liveness / readiness probe 用 |
+
+#### Terminal Gateway（`exkes-terminal-gateway`、WebSocket）
+
+`GET /v1/terminal` に接続し、最初のフレームで `{"type":"auth","token":"..."}` を送る。token は
+`POST /v1/runtimes/{id}/terminal-sessions` で発行された単回使用のもの（URL には載せない）。
+以後は runtime-agent の PTY 仕様（[docs/runtime-agent-terminal.md](docs/runtime-agent-terminal.md)）の JSON フレームを中継する。
+認証・Runtime 再検証・アイドル / 最大寿命・監査ログの詳細は [docs/terminal-gateway.md](docs/terminal-gateway.md)。
 
 #### Idempotency-Key（POST の再送安全性）
 
