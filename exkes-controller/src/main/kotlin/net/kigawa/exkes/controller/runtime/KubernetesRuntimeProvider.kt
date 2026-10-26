@@ -1,20 +1,28 @@
 package net.kigawa.exkes.controller.runtime
 
+import io.kubernetes.client.custom.IntOrString
 import io.kubernetes.client.custom.Quantity
 import io.kubernetes.client.openapi.ApiException
 import io.kubernetes.client.openapi.apis.CoreV1Api
+import io.kubernetes.client.openapi.models.V1Capabilities
 import io.kubernetes.client.openapi.models.V1Container
-import io.kubernetes.client.openapi.models.V1ContainerPort
+import io.kubernetes.client.openapi.models.V1EmptyDirVolumeSource
 import io.kubernetes.client.openapi.models.V1EnvVar
+import io.kubernetes.client.openapi.models.V1HTTPGetAction
+import io.kubernetes.client.openapi.models.V1LocalObjectReference
 import io.kubernetes.client.openapi.models.V1ObjectMeta
+import io.kubernetes.client.openapi.models.V1PersistentVolumeClaimVolumeSource
 import io.kubernetes.client.openapi.models.V1Pod
 import io.kubernetes.client.openapi.models.V1PodSpec
 import io.kubernetes.client.openapi.models.V1PodSecurityContext
+import io.kubernetes.client.openapi.models.V1Probe
 import io.kubernetes.client.openapi.models.V1ResourceRequirements
+import io.kubernetes.client.openapi.models.V1SeccompProfile
 import io.kubernetes.client.openapi.models.V1SecurityContext
 import io.kubernetes.client.openapi.models.V1Volume
 import io.kubernetes.client.openapi.models.V1VolumeMount
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonPrimitive
 import net.kigawa.exkes.common.config.WorkspaceConfig
 import net.kigawa.exkes.common.db.RuntimeTemplateRepository
 import net.kigawa.exkes.common.db.WorkspaceRepository
@@ -26,6 +34,7 @@ import net.kigawa.exkes.common.domain.RuntimeTemplateNotFoundException
 import net.kigawa.exkes.common.domain.KubernetesRuntimeException
 import net.kigawa.exkes.common.domain.Workspace
 import net.kigawa.exkes.controller.config.KubernetesConfig
+import net.kigawa.exkes.controller.config.RuntimeAgentConfig
 import net.kigawa.exkes.controller.k8s.KubernetesClientFactory
 import net.kigawa.exkes.controller.workspace.resolvePvcName
 import org.slf4j.LoggerFactory
@@ -35,11 +44,13 @@ import org.slf4j.LoggerFactory
  *
  * Creates a Pod with:
  * - User container (from RuntimeTemplate.image)
- * - runtime-agent sidecar (fixed image, for process/PTY/log management)
- * - Workspace PVC mount at /workspace
+ * - runtime-agent sidecar (image from [RuntimeAgentConfig], for process/PTY/log management)
+ * - Workspace PVC mount at /workspace (both containers)
  * - Resource limits/requests from RuntimeSpec or template defaults
  * - Environment variables from RuntimeSpec or template defaults
- * - SecurityContext: non-root, readOnlyRootFilesystem, drop ALL capabilities, seccomp RuntimeDefault
+ * - SecurityContext: non-root, drop ALL capabilities, seccomp RuntimeDefault; the agent
+ *   additionally runs with a read-only root filesystem (see [buildRuntimePodSpec])
+ * - imagePullSecrets from [RuntimeAgentConfig.imagePullSecret] (the Secret must exist in the Sandbox namespace)
  *
  * Also manages the Runtime's ClusterIP Service (see [RuntimeServiceManager]): name = Pod name,
  * selects only that Pod, port 8080 -> runtime-agent.
@@ -52,6 +63,7 @@ class KubernetesRuntimeProvider(
     private val templateRepository: RuntimeTemplateRepository,
     private val workspaceConfig: WorkspaceConfig,
     private val workspaceRepository: WorkspaceRepository,
+    private val runtimeAgent: RuntimeAgentConfig,
 ) : RuntimeProvisioner {
     private val logger = LoggerFactory.getLogger(KubernetesRuntimeProvider::class.java)
     private val json = Json { ignoreUnknownKeys = true }
@@ -185,7 +197,7 @@ class KubernetesRuntimeProvider(
     }
 
     private fun buildPod(runtime: Runtime, template: RuntimeTemplate, podName: String, workspace: Workspace): V1Pod {
-        val spec = buildPodSpec(runtime, template, workspace)
+        val spec = buildRuntimePodSpec(runtime, template, workspace, runtimeAgent, json)
 
         return V1Pod()
             .metadata(
@@ -202,101 +214,6 @@ class KubernetesRuntimeProvider(
             .spec(spec)
     }
 
-    private fun buildPodSpec(runtime: Runtime, template: RuntimeTemplate, workspace: Workspace): V1PodSpec {
-        val resources = mergeResources(template.defaultResourcesJson, runtime.resourcesJson)
-        val envVars = mergeEnv(template.defaultEnvJson, runtime.envJson)
-
-        val userContainer = V1Container()
-            .name("user")
-            .image(template.image)
-            .resources(buildResourceRequirements(resources))
-            .env(envVars)
-            .securityContext(buildContainerSecurityContext())
-            .volumeMounts(listOf(
-                V1VolumeMount().name("workspace").mountPath("/workspace").readOnly(false),
-                V1VolumeMount().name("tmp").mountPath("/tmp").readOnly(false),
-            ))
-
-        val agentContainer = V1Container()
-            .name("runtime-agent")
-            .image("ghcr.io/kigawa/runtime-agent:latest") // Fixed sidecar image
-            .resources(V1ResourceRequirements()
-                .requests(mapOf("cpu" to Quantity("100m"), "memory" to Quantity("64Mi")))
-                .limits(mapOf("cpu" to Quantity("500m"), "memory" to Quantity("256Mi"))))
-            .securityContext(buildContainerSecurityContext())
-            .volumeMounts(listOf(
-                V1VolumeMount().name("workspace").mountPath("/workspace").readOnly(false),
-                V1VolumeMount().name("tmp").mountPath("/tmp").readOnly(false),
-            ))
-
-        val volumes = listOf(
-            V1Volume()
-                .name("workspace")
-                .persistentVolumeClaim(
-                    io.kubernetes.client.openapi.models.V1PersistentVolumeClaimVolumeSource()
-                        .claimName(workspace.resolvePvcName())
-                ),
-            V1Volume()
-                .name("tmp")
-                .emptyDir(io.kubernetes.client.openapi.models.V1EmptyDirVolumeSource())
-        )
-
-        return V1PodSpec()
-            .containers(listOf(userContainer, agentContainer))
-            .volumes(volumes)
-            .securityContext(V1PodSecurityContext()
-                .runAsNonRoot(true)
-                .runAsUser(1000)
-                .seccompProfile(io.kubernetes.client.openapi.models.V1SeccompProfile()
-                    .type("RuntimeDefault")))
-            .automountServiceAccountToken(false)
-            .restartPolicy("Never")
-    }
-
-    private fun buildResourceRequirements(resourcesJson: String?): V1ResourceRequirements {
-        val reqs = V1ResourceRequirements()
-        resourcesJson?.let { Json { ignoreUnknownKeys = true }.decodeFromString<Map<String, Any>>(it) }?.let { resources ->
-            val requests = mutableMapOf<String, Quantity>()
-            val limits = mutableMapOf<String, Quantity>()
-            resources.forEach { entry ->
-                val key = entry.key
-                val value = entry.value
-                val qty = Quantity(value.toString())
-                when (key.lowercase()) {
-                    "cpu", "memory", "ephemeral-storage" -> {
-                        requests[key] = qty
-                        limits[key] = qty
-                    }
-                }
-            }
-            if (requests.isNotEmpty()) reqs.requests(requests)
-            if (limits.isNotEmpty()) reqs.limits(limits)
-        }
-        return reqs
-    }
-
-    private fun buildContainerSecurityContext(): V1SecurityContext {
-        return V1SecurityContext()
-            .allowPrivilegeEscalation(false)
-            .privileged(false)
-            .readOnlyRootFilesystem(false) // We need /workspace and /tmp writable
-            .runAsNonRoot(true)
-            .runAsUser(1000)
-            .capabilities(io.kubernetes.client.openapi.models.V1Capabilities().drop(listOf("ALL")))
-    }
-
-    private fun mergeResources(templateJson: String?, overrideJson: String?): String? {
-        if (overrideJson != null) return overrideJson
-        return templateJson
-    }
-
-    private fun mergeEnv(templateJson: String?, overrideJson: String?): List<V1EnvVar> {
-        val merged = mutableMapOf<String, String>()
-        templateJson?.let { Json { ignoreUnknownKeys = true }.decodeFromString<Map<String, String>>(it) }?.forEach { entry -> merged[entry.key] = entry.value }
-        overrideJson?.let { Json { ignoreUnknownKeys = true }.decodeFromString<Map<String, String>>(it) }?.forEach { entry -> merged[entry.key] = entry.value }
-        return merged.map { entry -> V1EnvVar().name(entry.key).value(entry.value) }
-    }
-
     private fun mapPodPhaseToRuntimeStatus(pod: V1Pod): RuntimeStatus = mapPodToRuntimeStatus(pod)
 
     private fun readPod(name: String): V1Pod? = try {
@@ -304,6 +221,122 @@ class KubernetesRuntimeProvider(
     } catch (e: ApiException) {
         if (e.code == 404) null else throw e
     }
+}
+
+/** UID both containers run as. Numeric so runAsNonRoot can be verified without the image's USER name. */
+internal const val RUNTIME_UID: Long = 1000L
+
+/** Where the workspace PVC is mounted in both containers. Also the runtime-agent working directory. */
+internal const val RUNTIME_WORKSPACE_PATH = "/workspace"
+
+/** runtime-agent state directory (execution metadata). An emptyDir, so the agent root filesystem can be read-only. */
+internal const val RUNTIME_AGENT_STATE_PATH = "/var/lib/exkes-agent"
+
+/**
+ * PodSpec of a Runtime: user container (template image) + runtime-agent sidecar, both mounting
+ * the workspace PVC at [RUNTIME_WORKSPACE_PATH]. Written against the Pod Security `restricted`
+ * profile: runAsNonRoot with a numeric UID, no privilege escalation, all capabilities dropped,
+ * RuntimeDefault seccomp, no host namespaces, only PVC and emptyDir volumes.
+ */
+internal fun buildRuntimePodSpec(
+    runtime: Runtime,
+    template: RuntimeTemplate,
+    workspace: Workspace,
+    agent: RuntimeAgentConfig,
+    json: Json,
+): V1PodSpec {
+    // Override (Runtime) wins over the template default, as a whole value.
+    val resources = runtime.resourcesJson ?: template.defaultResourcesJson
+    val envVars = mergeRuntimeEnv(template.defaultEnvJson, runtime.envJson, json)
+
+    val workspaceMount = V1VolumeMount().name("workspace").mountPath(RUNTIME_WORKSPACE_PATH).readOnly(false)
+    val tmpMount = V1VolumeMount().name("tmp").mountPath("/tmp").readOnly(false)
+
+    val userContainer = V1Container()
+        .name("user")
+        .image(template.image)
+        .resources(buildResourceRequirements(resources, json))
+        .env(envVars)
+        .securityContext(buildContainerSecurityContext(readOnlyRootFilesystem = false))
+        .volumeMounts(listOf(workspaceMount, tmpMount))
+
+    val agentContainer = V1Container()
+        .name("runtime-agent")
+        .image(agent.image)
+        .env(listOf(
+            V1EnvVar().name("EXKES_AGENT_WORKING_DIR").value(RUNTIME_WORKSPACE_PATH),
+            V1EnvVar().name("EXKES_AGENT_STATE_DIR").value(RUNTIME_AGENT_STATE_PATH),
+        ))
+        .resources(V1ResourceRequirements()
+            .requests(mapOf("cpu" to Quantity("100m"), "memory" to Quantity("64Mi")))
+            .limits(mapOf("cpu" to Quantity("500m"), "memory" to Quantity("256Mi"))))
+        .readinessProbe(V1Probe()
+            .httpGet(V1HTTPGetAction().path("/health").port(IntOrString(RUNTIME_AGENT_PORT)))
+            .periodSeconds(5))
+        // The agent writes only to /tmp (JNI libraries, JVM) and its state directory.
+        .securityContext(buildContainerSecurityContext(readOnlyRootFilesystem = true))
+        .volumeMounts(listOf(
+            workspaceMount,
+            tmpMount,
+            V1VolumeMount().name("agent-state").mountPath(RUNTIME_AGENT_STATE_PATH).readOnly(false),
+        ))
+
+    val volumes = listOf(
+        V1Volume()
+            .name("workspace")
+            .persistentVolumeClaim(V1PersistentVolumeClaimVolumeSource().claimName(workspace.resolvePvcName())),
+        V1Volume().name("tmp").emptyDir(V1EmptyDirVolumeSource()),
+        V1Volume().name("agent-state").emptyDir(V1EmptyDirVolumeSource()),
+    )
+
+    return V1PodSpec()
+        .containers(listOf(userContainer, agentContainer))
+        .volumes(volumes)
+        .imagePullSecrets(agent.imagePullSecret?.let { listOf(V1LocalObjectReference().name(it)) })
+        .securityContext(V1PodSecurityContext()
+            .runAsNonRoot(true)
+            .runAsUser(RUNTIME_UID)
+            .seccompProfile(V1SeccompProfile().type("RuntimeDefault")))
+        .automountServiceAccountToken(false)
+        .restartPolicy("Never")
+}
+
+private fun buildContainerSecurityContext(readOnlyRootFilesystem: Boolean): V1SecurityContext =
+    V1SecurityContext()
+        .allowPrivilegeEscalation(false)
+        .privileged(false)
+        .readOnlyRootFilesystem(readOnlyRootFilesystem)
+        .runAsNonRoot(true)
+        .runAsUser(RUNTIME_UID)
+        .capabilities(V1Capabilities().drop(listOf("ALL")))
+
+private fun buildResourceRequirements(resourcesJson: String?, json: Json): V1ResourceRequirements {
+    val reqs = V1ResourceRequirements()
+    // Values may be JSON strings ("500m") or numbers (2); JsonPrimitive.content covers both.
+    resourcesJson?.let { json.decodeFromString<Map<String, JsonPrimitive>>(it) }?.let { resources ->
+        val requests = mutableMapOf<String, Quantity>()
+        val limits = mutableMapOf<String, Quantity>()
+        resources.forEach { entry ->
+            val key = entry.key
+            val qty = Quantity(entry.value.content)
+            when (key.lowercase()) {
+                "cpu", "memory", "ephemeral-storage" -> {
+                    requests[key] = qty
+                    limits[key] = qty
+                }
+            }
+        }
+        if (requests.isNotEmpty()) reqs.requests(requests)
+        if (limits.isNotEmpty()) reqs.limits(limits)
+    }
+    return reqs
+}
+
+private fun mergeRuntimeEnv(templateJson: String?, overrideJson: String?, json: Json): List<V1EnvVar> {
+    val merged = linkedMapOf<String, String>()
+    templateJson?.let { json.decodeFromString<Map<String, String>>(it) }?.forEach { merged[it.key] = it.value }
+    overrideJson?.let { json.decodeFromString<Map<String, String>>(it) }?.forEach { merged[it.key] = it.value }
+    return merged.map { V1EnvVar().name(it.key).value(it.value) }
 }
 
 /**

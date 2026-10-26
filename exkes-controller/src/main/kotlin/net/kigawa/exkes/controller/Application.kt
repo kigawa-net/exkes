@@ -80,6 +80,7 @@ fun Application.module() {
         templateRepository = templateRepository,
         workspaceConfig = workspaceConfig,
         workspaceRepository = workspaceRepository,
+        runtimeAgent = controllerConfig.runtimeAgent,
     )
     val runtimeReconciler = RuntimeReconciler(
         runtimeRepository = runtimeRepository,

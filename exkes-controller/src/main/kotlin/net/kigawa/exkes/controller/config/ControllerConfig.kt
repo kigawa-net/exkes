@@ -84,10 +84,39 @@ data class ReconcilerConfig(
     }
 }
 
+/**
+ * `exkes.runtime.*` section of application.conf: the runtime-agent sidecar that every
+ * Runtime Pod carries (the user container image comes from the RuntimeTemplate instead).
+ *
+ * @property image full image reference of runtime-agent. The CI tag is
+ *   `harbor.kigawa.net/private/exkes-runtime-agent:main-<sha>`; the platform manifest of
+ *   exkes-controller sets it through `EXKES_RUNTIME_AGENT_IMAGE`.
+ * @property imagePullSecret name of a `kubernetes.io/dockerconfigjson` Secret in the
+ *   resource (sandbox) namespace, added to `imagePullSecrets` of every Runtime Pod.
+ *   `null` (configured as an empty string) adds none.
+ */
+data class RuntimeAgentConfig(
+    val image: String,
+    val imagePullSecret: String?,
+) {
+    companion object {
+        fun fromConfig(config: ApplicationConfig): RuntimeAgentConfig {
+            val image = config.property("exkes.runtime.agentImage").getString().trim()
+            require(image.isNotEmpty()) { "exkes.runtime.agentImage must not be empty" }
+            val secret = config.property("exkes.runtime.imagePullSecret").getString().trim()
+            return RuntimeAgentConfig(
+                image = image,
+                imagePullSecret = secret.ifEmpty { null },
+            )
+        }
+    }
+}
+
 /** Everything exkes-controller reads out of application.conf. */
 data class ControllerConfig(
     val kubernetes: KubernetesConfig,
     val reconciler: ReconcilerConfig,
+    val runtimeAgent: RuntimeAgentConfig,
 ) {
     companion object {
         fun fromApplication(application: Application): ControllerConfig =
@@ -96,6 +125,7 @@ data class ControllerConfig(
         fun fromConfig(config: ApplicationConfig): ControllerConfig = ControllerConfig(
             kubernetes = KubernetesConfig.fromConfig(config),
             reconciler = ReconcilerConfig.fromConfig(config),
+            runtimeAgent = RuntimeAgentConfig.fromConfig(config),
         )
     }
 }

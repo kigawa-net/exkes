@@ -146,4 +146,23 @@ PTY の実現に **pty4j 0.13.13**（`org.jetbrains.pty4j:pty4j`）を採用。
 - **出力の切り捨て:** 終了直前の未配信出力は、クライアントが極端に遅い場合 3 秒の排出上限で切り捨てられることがある。
 - **バイナリ非可逆:** 上記のとおり、UTF-8 以外のバイトは U+FFFD になる。
 - **認証なし:** agent の `/terminal` は誰でも接続できる。gateway 経由に限定する NetworkPolicy が前提。
-- **コンテナでの実機確認は未実施:** `eclipse-temurin:21-jre-jammy` 上での PTY 動作（`/dev/ptmx`、非 root ユーザー `exkes` での libpty 展開）は、ローカルのユニットテスト（実 PTY）でのみ確認している。
+- **Pod 内のシェルは agent コンテナのもの:** Terminal のシェルは runtime-agent の image（`eclipse-temurin:21-jre-jammy` ベース、`/bin/sh` は dash）上で起動する。user コンテナの作業ツール（git 等）は見えない。user コンテナ内で開く経路は未実装。
+
+## コンテナでの確認（Runtime Pod 相当）
+
+`docker build --build-arg MODULE=runtime-agent -t exkes-runtime-agent:test .` で作った image を、Pod の securityContext 相当の条件で起動して確認した。
+
+- `--user 1000:1000 --read-only --cap-drop ALL --security-opt no-new-privileges:true`、`/tmp`・`/workspace`・`/var/lib/exkes-agent` は tmpfs（Pod では emptyDir / PVC）
+- `GET /health` → `200 ok`
+- `GET /terminal?cols=100&rows=30&cwd=/workspace` の WebSocket で `input` を送ると、`output` に `echo` の結果、`id -u` が `1000`、`pwd` が `/workspace`。`exit` で `exit code 0`。
+- 反例: `/var/lib/exkes-agent` を書き込み可能にしないと起動時に `FileSystemException: /var/lib/exkes-agent: Read-only file system` で終了する。Pod spec で state 用 emptyDir を必ずマウントすること。
+
+Pod 側の前提（`exkes-controller` の `buildRuntimePodSpec`）:
+
+| 項目 | 値 |
+|---|---|
+| UID / GID | 1000 / 1000（数値。両コンテナ、Pod レベル） |
+| 環境変数（agent） | `EXKES_AGENT_WORKING_DIR=/workspace`、`EXKES_AGENT_STATE_DIR=/var/lib/exkes-agent` |
+| マウント（agent） | `/workspace`（PVC）、`/tmp`（emptyDir）、`/var/lib/exkes-agent`（emptyDir）。root fs は read-only |
+| readiness | `GET /health` ポート 8080 |
+| imagePullSecrets | `exkes.runtime.imagePullSecret`（既定 `harbor-registry`、空で無効） |

@@ -20,8 +20,10 @@ env:
   MANIFEST_REPOSITORY: kigawa-net/platform
   SOURCE_DIR: exkes/stg
   TARGET_DIR: exkes/main
-  # issue #2 の対象モジュールは exkes-api と exkes-controller の 2 つだけ。
-  # deploy-stg.yml の MODULES / build の matrix と揃える。
+  # Deployment を持ち platform の exkes/{stg,main}/<module>.yaml を持つモジュールだけ。
+  # deploy-stg.yml の MODULES と揃える。runtime-agent は Deployment を持たず、
+  # stg の manifest が無いためここでは昇格しない（image は build 時の main-<sha> tag で
+  # 既に Harbor にあり、Runtime template / controller の設定で参照する）。
   MODULES: exkes-api exkes-controller
 
 jobs:
