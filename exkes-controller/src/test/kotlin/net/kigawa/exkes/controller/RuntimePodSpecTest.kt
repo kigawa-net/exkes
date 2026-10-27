@@ -149,6 +149,13 @@ class RuntimePodSpecTest {
     }
 
     @Test
+    fun `serialized spec omits overhead so no RuntimeClass is required`() {
+        val pod = io.kubernetes.client.openapi.models.V1Pod().spec(spec())
+        val serialized = io.kubernetes.client.util.Yaml.dump(pod)
+        assertFalse(serialized.contains("overhead"), serialized)
+    }
+
+    @Test
     fun `volumes are limited to the workspace PVC and emptyDirs`() {
         val volumes = spec().volumes
         assertEquals(setOf("workspace", "tmp", "agent-state"), volumes.map { it.name }.toSet())

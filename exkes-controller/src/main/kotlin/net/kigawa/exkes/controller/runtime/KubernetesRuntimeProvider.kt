@@ -299,6 +299,9 @@ internal fun buildRuntimePodSpec(
             .seccompProfile(V1SeccompProfile().type("RuntimeDefault")))
         .automountServiceAccountToken(false)
         .restartPolicy("Never")
+        // client-java defaults this map to empty and serializes it as `overhead: {}`, which the
+        // API server rejects unless a RuntimeClass defines an overhead.
+        .overhead(null)
 }
 
 private fun buildContainerSecurityContext(readOnlyRootFilesystem: Boolean): V1SecurityContext =
