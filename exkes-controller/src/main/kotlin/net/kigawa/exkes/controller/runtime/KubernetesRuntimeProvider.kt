@@ -296,6 +296,7 @@ internal fun buildRuntimePodSpec(
         .securityContext(V1PodSecurityContext()
             .runAsNonRoot(true)
             .runAsUser(RUNTIME_UID)
+            .fsGroup(RUNTIME_UID)
             .seccompProfile(V1SeccompProfile().type("RuntimeDefault")))
         .automountServiceAccountToken(false)
         .restartPolicy("Never")
