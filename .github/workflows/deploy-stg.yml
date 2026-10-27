@@ -32,7 +32,7 @@ env:
   # 別物で、matrix にだけ居るモジュール（runtime-agent: Deployment を持たず、
   # runtime_templates.image / Runtime Pod の sidecar として使われる）はここに入れない。
   # 追加手順は CLAUDE.md「モジュール構成」を参照。
-  MODULES: exkes-api exkes-controller
+  MODULES: exkes-api exkes-controller exkes-terminal-gateway
 
 jobs:
   test:
@@ -70,6 +70,8 @@ jobs:
             image: exkes-api
           - module: exkes-controller
             image: exkes-controller
+          - module: exkes-terminal-gateway
+            image: exkes-terminal-gateway
           - module: runtime-agent
             image: exkes-runtime-agent
     outputs:
