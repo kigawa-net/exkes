@@ -1,7 +1,10 @@
 package net.kigawa.exkes.api
 
+import io.ktor.http.HttpHeaders
+import io.ktor.http.HttpMethod
 import io.ktor.serialization.kotlinx.json.*
 import io.ktor.server.application.*
+import io.ktor.server.plugins.cors.routing.CORS
 import io.ktor.server.plugins.contentnegotiation.*
 import io.ktor.server.routing.*
 import kotlinx.serialization.json.Json
@@ -85,6 +88,14 @@ fun Application.module() {
 
     install(ContentNegotiation) {
         json(Json { ignoreUnknownKeys = true })
+    }
+
+    // Allow the dashboard (deployed as a separate static site) to call the API.
+    install(CORS) {
+        allowHost("exkes-stg.kigawa.net", schemes = listOf("https"))
+        allowHost("exkes.kigawa.net", schemes = listOf("https"))
+        allowMethod(HttpMethod.Get)
+        allowHeader(HttpHeaders.ContentType)
     }
 
     // Common error format for every route (plan chapter 6.2).
