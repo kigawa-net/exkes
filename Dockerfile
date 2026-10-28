@@ -13,6 +13,12 @@ FROM gradle:jdk21 AS builder
 
 ARG MODULE
 
+# Node.js is required for the Kotlin/WASM browser distribution build (dashboard).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    nodejs \
+    npm \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 # Copy the build scripts of every module first: settings.gradle.kts includes
@@ -26,6 +32,7 @@ COPY exkes-api/build.gradle.kts exkes-api/
 COPY exkes-controller/build.gradle.kts exkes-controller/
 COPY exkes-terminal-gateway/build.gradle.kts exkes-terminal-gateway/
 COPY runtime-agent/build.gradle.kts runtime-agent/
+COPY exkes-dashboard/build.gradle.kts exkes-dashboard/
 
 # Resolve (download) the runtime classpath before copying sources so that
 # source-only changes reuse this layer.
@@ -34,9 +41,16 @@ RUN ./gradlew --no-daemon ":${MODULE}:dependencies" --configuration runtimeClass
 # exkes-common is a project dependency of every control plane module.
 COPY exkes-common/ exkes-common/
 COPY ${MODULE}/ ${MODULE}/
+# The dashboard sources are needed only when building exkes-api so that the
+# WASM static files can be bundled into the API resources.
+COPY exkes-dashboard/ exkes-dashboard/
 
 # gradle-wrapper.properties pins Gradle 8.14, so ./gradlew is used instead of
 # the Gradle version baked into the base image.
+# Build the dashboard WASM static files and copy them into exkes-api resources.
+# This task is a no-op when MODULE is not exkes-api.
+RUN ./gradlew --no-daemon :exkes-api:bundleDashboard
+
 RUN ./gradlew --no-daemon ":${MODULE}:installDist"
 
 # --- Runtime stage ----------------------------------------------------------
@@ -54,6 +68,9 @@ WORKDIR /app
 
 # installDist layout: build/install/<module>/{bin,lib}
 COPY --from=builder /app/${MODULE}/build/install/${MODULE}/ ./
+
+# Dashboard static files are already bundled into the API resources by the
+# bundleDashboard Gradle task above, so no separate COPY is needed.
 
 RUN chown -R exkes:exkes /app
 USER exkes

@@ -63,15 +63,8 @@
         <p>Loading exkes Dashboard...</p>
     </div>
     <canvas id="exkes-dashboard"></canvas>
-    <script src="skiko.js"></script>
-    <script src="index.js"></script>
-    <script>
-        // API base URL for the dashboard.
-        // Set this to the exkes-api URL when deploying as a separate service.
-        // Example: window.__EXKES_API_URL__ = "https://api.exkes-stg.kigawa.net";
-        // If not set, the dashboard uses relative paths (same-origin API).
-        // window.__EXKES_API_URL__ = "";
-    </script>
+    <script src="/static/skiko.js"></script>
+    <script src="/static/index.js"></script>
     <script>
         // Hide loading screen once WASM is ready
         window.addEventListener('load', function() {
