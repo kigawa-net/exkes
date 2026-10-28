@@ -4,7 +4,9 @@ import org.jetbrains.kotlin.gradle.dsl.KotlinJvmProjectExtension
 // per project below (plan chapter 4).
 plugins {
     alias(libs.plugins.kotlin.jvm) apply false
+    alias(libs.plugins.kotlin.multiplatform) apply false
     alias(libs.plugins.kotlin.serialization) apply false
+    alias(libs.plugins.compose) apply false
     alias(libs.plugins.ktor) apply false
 }
 
@@ -20,20 +22,25 @@ allprojects {
 }
 
 subprojects {
-    // Every module is a Kotlin/JVM module. runtime-agent is a sandbox-side
-    // module and must never depend on exkes-common (plan chapter 3).
-    apply(plugin = kotlinJvmPluginId)
-    apply(plugin = kotlinSerializationPluginId)
+    // exkes-dashboard is a Compose Multiplatform WASM module, not JVM.
+    val isDashboard = project.name == "exkes-dashboard"
 
-    configure<KotlinJvmProjectExtension> {
-        jvmToolchain(21)
-    }
+    if (!isDashboard) {
+        // Every module is a Kotlin/JVM module. runtime-agent is a sandbox-side
+        // module and must never depend on exkes-common (plan chapter 3).
+        apply(plugin = kotlinJvmPluginId)
+        apply(plugin = kotlinSerializationPluginId)
 
-    dependencies {
-        "testImplementation"(kotlinTestJunit5)
-    }
+        configure<KotlinJvmProjectExtension> {
+            jvmToolchain(21)
+        }
 
-    tasks.withType<Test>().configureEach {
-        useJUnitPlatform()
+        dependencies {
+            "testImplementation"(kotlinTestJunit5)
+        }
+
+        tasks.withType<Test>().configureEach {
+            useJUnitPlatform()
+        }
     }
 }

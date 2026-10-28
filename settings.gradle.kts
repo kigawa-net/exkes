@@ -8,6 +8,7 @@ pluginManagement {
 dependencyResolutionManagement {
     repositories {
         mavenCentral()
+        google()
     }
 }
 
@@ -19,4 +20,5 @@ include(
     "exkes-controller",
     "exkes-terminal-gateway",
     "runtime-agent",
+    "exkes-dashboard",
 )
