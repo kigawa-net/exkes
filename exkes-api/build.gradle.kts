@@ -31,7 +31,11 @@ dependencies {
 // Bundle the dashboard WASM static files into exkes-api resources.
 // This task builds the dashboard and copies the output to
 // exkes-api/src/main/resources/dashboard/ so that Ktor can serve them.
+// Skipped when BUNDLE_DASHBOARD=false (e.g., non-exkes-api Docker builds).
 tasks.register("bundleDashboard") {
+    onlyIf {
+        System.getenv("BUNDLE_DASHBOARD") != "false"
+    }
     dependsOn(":exkes-dashboard:wasmJsBrowserDistribution")
     doLast {
         val distDir = file("../exkes-dashboard/build/dist/wasmJs/productionExecutable")

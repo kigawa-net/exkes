@@ -48,8 +48,13 @@ COPY exkes-dashboard/ exkes-dashboard/
 # gradle-wrapper.properties pins Gradle 8.14, so ./gradlew is used instead of
 # the Gradle version baked into the base image.
 # Build the dashboard WASM static files and copy them into exkes-api resources.
-# This task is a no-op when MODULE is not exkes-api.
-RUN ./gradlew --no-daemon :exkes-api:bundleDashboard
+# Only run for exkes-api; for other modules, skip the WASM build to avoid the
+# long Node.js download from nodejs.org that times out in CI.
+RUN if [ "$MODULE" = "exkes-api" ]; then \
+      ./gradlew --no-daemon :exkes-api:bundleDashboard; \
+    else \
+      BUNDLE_DASHBOARD=false ./gradlew --no-daemon :exkes-api:bundleDashboard; \
+    fi
 
 RUN ./gradlew --no-daemon ":${MODULE}:installDist"
 
