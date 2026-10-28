@@ -2,8 +2,10 @@ package net.kigawa.exkes.api
 
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpMethod
+import io.ktor.http.HttpStatusCode
 import io.ktor.serialization.kotlinx.json.*
 import io.ktor.server.application.*
+import io.ktor.server.http.content.staticResources
 import io.ktor.server.plugins.cors.routing.CORS
 import io.ktor.server.plugins.contentnegotiation.*
 import io.ktor.server.routing.*
@@ -90,7 +92,9 @@ fun Application.module() {
         json(Json { ignoreUnknownKeys = true })
     }
 
-    // Allow the dashboard (deployed as a separate static site) to call the API.
+    // Allow cross-origin requests from the dashboard domain.
+    // The dashboard is now bundled into exkes-api and served from the same origin,
+    // but CORS is kept for future flexibility (e.g., separate deployment).
     install(CORS) {
         allowHost("exkes-stg.kigawa.net", schemes = listOf("https"))
         allowHost("exkes.kigawa.net", schemes = listOf("https"))
@@ -102,6 +106,14 @@ fun Application.module() {
     installErrorPages()
 
     routing {
+        // Serve the dashboard static files from the classpath resources.
+        // The dashboard is built as a WASM static site and bundled into the API JAR
+        // resources during the CI build (see Dockerfile, bundleDashboard task).
+        staticResources("/static", "dashboard")
+        // Serve index.html at the root path so that navigating to the domain
+        // shows the dashboard instead of a 404.
+        staticResources("/", "dashboard", "index.html")
+
         configureHealthRoutes()
         configureWorkspaceRoutes(workspaceService)
         configureRuntimeRoutes(runtimeService)
