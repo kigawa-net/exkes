@@ -112,7 +112,7 @@ fun Application.module() {
         // so we use a custom route handler that reads from the classpath directly.
         val classLoader = javaClass.classLoader
         logger.info("Dashboard classloader: {}", classLoader)
-        get("/") {
+        get("/dashboard") {
             val resource = classLoader?.getResourceAsStream("dashboard/index.html")
             if (resource != null) {
                 call.respondBytes(resource.readBytes(), contentType = ContentType("text", "html"))
@@ -121,7 +121,7 @@ fun Application.module() {
                 call.respond(HttpStatusCode.NotFound, "Dashboard not found")
             }
         }
-        get("/static/{file}") {
+        get("/dashboard/{file}") {
             val fileName = call.parameters["file"] ?: ""
             val resource = classLoader?.getResourceAsStream("dashboard/$fileName")
             if (resource != null) {
