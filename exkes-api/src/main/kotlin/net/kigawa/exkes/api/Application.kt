@@ -115,8 +115,10 @@ fun Application.module() {
         // directory during the CI build (see Dockerfile, bundleDashboard task).
         // Ktor's staticResources() cannot reliably serve files from inside a JAR
         // (KTOR-3880), so we use static { files(...) } with a file-based directory.
-        val dashboardDir = java.io.File("dashboard")
-        if (dashboardDir.exists() && dashboardDir.isDirectory) {
+        // Try both absolute path (/app/dashboard in Docker) and relative path (local dev).
+        val dashboardDir = java.io.File("/app/dashboard").takeIf { it.exists() && it.isDirectory }
+            ?: java.io.File("dashboard").takeIf { it.exists() && it.isDirectory }
+        if (dashboardDir != null) {
             static("/static") {
                 files(dashboardDir)
             }
