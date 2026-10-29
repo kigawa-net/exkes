@@ -6,13 +6,12 @@ import io.ktor.http.HttpStatusCode
 import io.ktor.http.ContentType
 import io.ktor.serialization.kotlinx.json.*
 import io.ktor.server.application.*
-import io.ktor.server.http.content.static
-import io.ktor.server.http.content.files
 import io.ktor.server.plugins.cors.routing.CORS
 import io.ktor.server.plugins.contentnegotiation.*
-import io.ktor.server.request.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
+import java.util.jar.JarFile
+import java.util.jar.JarEntry
 import kotlinx.serialization.json.Json
 import net.kigawa.exkes.api.routes.configureExecutionRoutes
 import net.kigawa.exkes.api.routes.configureHealthRoutes
@@ -110,29 +109,33 @@ fun Application.module() {
     installErrorPages()
 
     routing {
-        // Serve the dashboard static files from the file system.
-        // The dashboard is built as a WASM static site and copied to the installDist
-        // directory during the CI build (see Dockerfile, bundleDashboard task).
-        // Ktor's staticResources() cannot reliably serve files from inside a JAR
-        // (KTOR-3880), so we use static { files(...) } with a file-based directory.
-        // Try both absolute path (/app/dashboard in Docker) and relative path (local dev).
-        val dashboardDir = java.io.File("/app/dashboard").takeIf { it.exists() && it.isDirectory }
-            ?: java.io.File("dashboard").takeIf { it.exists() && it.isDirectory }
-        // Debug: log dashboard directory status
-        logger.info("Dashboard dir: {} (exists: {})", dashboardDir?.absolutePath, dashboardDir?.exists())
-        if (dashboardDir != null) {
-            static("/static") {
-                files(dashboardDir)
+        // Serve the dashboard static files from classpath resources.
+        // Ktor's staticResources() has issues with JAR-embedded resources (KTOR-3880),
+        // so we use a custom route handler that reads from the classpath directly.
+        get("/") {
+            val resource = javaClass.classLoader.getResourceAsStream("dashboard/index.html")
+            if (resource != null) {
+                call.respondBytes(resource.readBytes(), contentType = ContentType("text", "html"))
+            } else {
+                call.respond(HttpStatusCode.NotFound, "Dashboard not found")
             }
-            // Serve index.html at the root path so that navigating to the domain
-            // shows the dashboard instead of a 404.
-            get("/") {
-                val indexFile = java.io.File(dashboardDir, "index.html")
-                if (indexFile.exists()) {
-                    call.respondBytes(indexFile.readBytes(), contentType = ContentType("text", "html"))
-                } else {
-                    call.respondText("Dashboard not found", status = HttpStatusCode.NotFound)
+        }
+        get("/static/{file}") {
+            val fileName = call.parameters["file"] ?: ""
+            val resource = javaClass.classLoader.getResourceAsStream("dashboard/$fileName")
+            if (resource != null) {
+                val contentType = when {
+                    fileName.endsWith(".html") -> ContentType("text", "html")
+                    fileName.endsWith(".js") -> ContentType("application", "javascript")
+                    fileName.endsWith(".wasm") -> ContentType("application", "wasm")
+                    fileName.endsWith(".json") -> ContentType("application", "json")
+                    fileName.endsWith(".map") -> ContentType("application", "json")
+                    fileName.endsWith(".txt") -> ContentType("text", "plain")
+                    else -> ContentType("application", "octet-stream")
                 }
+                call.respondBytes(resource.readBytes(), contentType = contentType)
+            } else {
+                call.respond(HttpStatusCode.NotFound, "File not found: $fileName")
             }
         }
 
