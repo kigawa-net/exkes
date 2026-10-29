@@ -6,11 +6,9 @@ import io.ktor.http.HttpStatusCode
 import io.ktor.http.ContentType
 import io.ktor.serialization.kotlinx.json.*
 import io.ktor.server.application.*
-import io.ktor.server.http.content.static
-import io.ktor.server.http.content.files
+import io.ktor.server.http.content.staticResources
 import io.ktor.server.plugins.cors.routing.CORS
 import io.ktor.server.plugins.contentnegotiation.*
-import io.ktor.server.request.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
 import kotlinx.serialization.json.Json
@@ -110,31 +108,13 @@ fun Application.module() {
     installErrorPages()
 
     routing {
-        // Serve the dashboard static files from the file system.
-        // The dashboard is built as a WASM static site and copied to the installDist
-        // directory during the CI build (see Dockerfile, bundleDashboard task).
-        // Ktor's staticResources() cannot reliably serve files from inside a JAR
-        // (KTOR-3880), so we use static { files(...) } with a file-based directory.
-        // Try both absolute path (/app/dashboard in Docker) and relative path (local dev).
-        val dashboardDir = java.io.File("/app/dashboard").takeIf { it.exists() && it.isDirectory }
-            ?: java.io.File("dashboard").takeIf { it.exists() && it.isDirectory }
-        // Debug: log dashboard directory status
-        logger.info("Dashboard dir: {} (exists: {})", dashboardDir?.absolutePath, dashboardDir?.exists())
-        if (dashboardDir != null) {
-            static("/static") {
-                files(dashboardDir)
-            }
-            // Serve index.html at the root path so that navigating to the domain
-            // shows the dashboard instead of a 404.
-            get("/") {
-                val indexFile = java.io.File(dashboardDir, "index.html")
-                if (indexFile.exists()) {
-                    call.respondBytes(indexFile.readBytes(), contentType = ContentType("text", "html"))
-                } else {
-                    call.respondText("Dashboard not found", status = HttpStatusCode.NotFound)
-                }
-            }
-        }
+        // Serve the dashboard static files from classpath resources.
+        // The dashboard is built as a WASM static site and bundled into the API JAR
+        // resources during the CI build (see Dockerfile, bundleDashboard task).
+        staticResources("/static", "dashboard")
+        // Serve index.html at the root path so that navigating to the domain
+        // shows the dashboard instead of a 404.
+        staticResources("/", "dashboard", "index.html")
 
         configureHealthRoutes()
         configureWorkspaceRoutes(workspaceService)
