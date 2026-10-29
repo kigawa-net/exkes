@@ -28,21 +28,20 @@ dependencies {
     testImplementation(libs.h2)
 }
 
-// Bundle the dashboard WASM static files into the exkes-api installDist directory.
-// Ktor's staticResources() cannot reliably serve files from inside a JAR
-// (KTOR-3880), so we copy the dashboard files next to the JAR in the installDist
-// layout. Ktor then serves them from the file system using static { files(...) }.
+// Bundle the dashboard WASM static files into exkes-api resources.
+// This task builds the dashboard and copies the output to the build resources
+// directory so that Ktor can serve them from the classpath.
 // Skipped when BUNDLE_DASHBOARD=false (e.g., non-exkes-api Docker builds).
 val bundleDashboardTask = tasks.register("bundleDashboard") {
     onlyIf {
         System.getenv("BUNDLE_DASHBOARD") != "false"
     }
     dependsOn(":exkes-dashboard:wasmJsBrowserDistribution")
-    dependsOn("installDist")
     doLast {
         val distDir = file("../exkes-dashboard/build/dist/wasmJs/productionExecutable")
-        // Copy to build/install/exkes-api/dashboard/ so Ktor can serve from the file system.
-        val targetDir = file("build/install/exkes-api/dashboard")
+        // Copy directly to build/resources/main/dashboard so that the files are
+        // available on the classpath without needing to re-run processResources.
+        val targetDir = file("build/resources/main/dashboard")
 
         if (targetDir.exists()) {
             targetDir.deleteRecursively()
@@ -52,4 +51,10 @@ val bundleDashboardTask = tasks.register("bundleDashboard") {
         // Copy all files from the WASM distribution directory
         distDir.copyRecursively(targetDir, overwrite = true)
     }
+}
+
+// Ensure processResources runs after bundleDashboard so the dashboard files
+// are included in the build output.
+tasks.named("processResources") {
+    dependsOn(bundleDashboardTask)
 }
