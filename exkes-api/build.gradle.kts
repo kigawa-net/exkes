@@ -58,3 +58,9 @@ val bundleDashboardTask = tasks.register("bundleDashboard") {
 tasks.named("processResources") {
     dependsOn(bundleDashboardTask)
 }
+
+// Ensure installDist runs after bundleDashboard so the dashboard files are
+// included in the JAR when building the Docker image.
+tasks.named("installDist") {
+    dependsOn(bundleDashboardTask)
+}
