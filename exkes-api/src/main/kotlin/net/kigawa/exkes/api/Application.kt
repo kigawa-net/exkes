@@ -118,6 +118,8 @@ fun Application.module() {
         // Try both absolute path (/app/dashboard in Docker) and relative path (local dev).
         val dashboardDir = java.io.File("/app/dashboard").takeIf { it.exists() && it.isDirectory }
             ?: java.io.File("dashboard").takeIf { it.exists() && it.isDirectory }
+        // Debug: log dashboard directory status
+        logger.info("Dashboard dir: {} (exists: {})", dashboardDir?.absolutePath, dashboardDir?.exists())
         if (dashboardDir != null) {
             static("/static") {
                 files(dashboardDir)
