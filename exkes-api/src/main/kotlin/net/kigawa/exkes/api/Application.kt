@@ -110,17 +110,20 @@ fun Application.module() {
         // Serve the dashboard static files from classpath resources.
         // Ktor's staticResources() has issues with JAR-embedded resources (KTOR-3880),
         // so we use a custom route handler that reads from the classpath directly.
+        val classLoader = javaClass.classLoader
+        logger.info("Dashboard classloader: {}", classLoader)
         get("/") {
-            val resource = javaClass.classLoader.getResourceAsStream("dashboard/index.html")
+            val resource = classLoader?.getResourceAsStream("dashboard/index.html")
             if (resource != null) {
                 call.respondBytes(resource.readBytes(), contentType = ContentType("text", "html"))
             } else {
+                logger.warn("dashboard/index.html not found on classpath")
                 call.respond(HttpStatusCode.NotFound, "Dashboard not found")
             }
         }
         get("/static/{file}") {
             val fileName = call.parameters["file"] ?: ""
-            val resource = javaClass.classLoader.getResourceAsStream("dashboard/$fileName")
+            val resource = classLoader?.getResourceAsStream("dashboard/$fileName")
             if (resource != null) {
                 val contentType = when {
                     fileName.endsWith(".html") -> ContentType("text", "html")
