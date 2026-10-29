@@ -47,16 +47,17 @@ COPY exkes-dashboard/ exkes-dashboard/
 
 # gradle-wrapper.properties pins Gradle 8.14, so ./gradlew is used instead of
 # the Gradle version baked into the base image.
-# Build the dashboard WASM static files and copy them into exkes-api resources.
-# Only run for exkes-api; for other modules, skip the WASM build to avoid the
-# long Node.js download from nodejs.org that times out in CI.
+# Build the dashboard WASM static files and bundle them into exkes-api resources,
+# then install the module. Both tasks run in a single Gradle invocation so that
+# bundleDashboard (which copies files to build/resources/main/dashboard) runs
+# before processResources, ensuring the dashboard files are in the classpath.
+# For non-exkes-api modules, skip the WASM build to avoid the long Node.js
+# download from nodejs.org that times out in CI.
 RUN if [ "$MODULE" = "exkes-api" ]; then \
-      ./gradlew --no-daemon :exkes-api:bundleDashboard; \
+      ./gradlew --no-daemon :exkes-api:bundleDashboard :${MODULE}:installDist; \
     else \
-      BUNDLE_DASHBOARD=false ./gradlew --no-daemon :exkes-api:bundleDashboard; \
+      BUNDLE_DASHBOARD=false ./gradlew --no-daemon :exkes-api:bundleDashboard :${MODULE}:installDist; \
     fi
-
-RUN ./gradlew --no-daemon ":${MODULE}:installDist"
 
 # --- Runtime stage ----------------------------------------------------------
 FROM eclipse-temurin:21-jre-jammy
