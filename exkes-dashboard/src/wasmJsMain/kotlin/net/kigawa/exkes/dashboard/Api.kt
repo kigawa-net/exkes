@@ -2,7 +2,7 @@ package net.kigawa.exkes.dashboard
 
 import io.ktor.client.*
 import io.ktor.client.call.body
-import io.ktor.client.engine.cio.CIO
+import io.ktor.client.engine.js.Js
 import io.ktor.client.plugins.contentnegotiation.*
 import io.ktor.client.request.get
 import io.ktor.serialization.kotlinx.json.*
@@ -40,7 +40,9 @@ private val apiJson = Json {
     isLenient = true
 }
 
-private val httpClient = HttpClient(CIO) {
+// WASM runs in the browser; use its Fetch API engine instead of CIO, which
+// targets native/JVM environments and cannot make browser HTTP requests.
+private val httpClient = HttpClient(Js) {
     install(ContentNegotiation) {
         json(apiJson)
     }

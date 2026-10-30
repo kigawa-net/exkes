@@ -41,7 +41,7 @@ kotlin {
                 implementation(compose.components.resources)
                 implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.8.1")
                 implementation(libs.ktor.client.core.wasm)
-                implementation(libs.ktor.client.cio.wasm)
+                implementation(libs.ktor.client.js)
                 implementation(libs.ktor.serialization.kotlinx.json.wasm)
                 implementation(libs.ktor.client.content.negotiation.wasm)
             }
