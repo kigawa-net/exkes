@@ -43,7 +43,7 @@ kotlin {
                 implementation(libs.ktor.client.core.wasm)
                 implementation(libs.ktor.client.js)
                 implementation(libs.ktor.serialization.kotlinx.json.wasm)
-                implementation(libs.ktor.client.content.negotiation)
+                implementation(libs.ktor.client.content.negotiation.wasm)
             }
         }
     }
