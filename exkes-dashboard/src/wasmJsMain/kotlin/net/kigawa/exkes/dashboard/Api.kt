@@ -2,6 +2,7 @@ package net.kigawa.exkes.dashboard
 
 import io.ktor.client.*
 import io.ktor.client.call.body
+import io.ktor.client.engine.cio.CIO
 import io.ktor.client.plugins.contentnegotiation.*
 import io.ktor.client.request.get
 import io.ktor.serialization.kotlinx.json.*
@@ -39,7 +40,7 @@ private val apiJson = Json {
     isLenient = true
 }
 
-private val httpClient = HttpClient {
+private val httpClient = HttpClient(CIO) {
     install(ContentNegotiation) {
         json(apiJson)
     }
