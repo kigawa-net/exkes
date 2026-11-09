@@ -5,7 +5,8 @@
 // from the control plane.
 
 import org.jetbrains.kotlin.gradle.ExperimentalWasmDsl
-import org.jetbrains.kotlin.gradle.targets.js.nodejs.NodeJsRootExtension
+import org.jetbrains.kotlin.gradle.targets.js.nodejs.NodeJsEnvSpec
+import org.jetbrains.kotlin.gradle.targets.js.nodejs.NodeJsPlugin
 
 plugins {
     alias(libs.plugins.kotlin.multiplatform)
@@ -17,8 +18,8 @@ plugins {
 // Use the system-installed Node.js instead of downloading from nodejs.org.
 // This avoids long download timeouts in CI environments (Dockerfile already
 // installs Node.js via apt).
-rootProject.plugins.withType<org.jetbrains.kotlin.gradle.targets.js.nodejs.NodeJsRootPlugin> {
-    rootProject.the<NodeJsRootExtension>().download = false
+plugins.withType<NodeJsPlugin> {
+    the<NodeJsEnvSpec>().download = false
 }
 
 kotlin {
