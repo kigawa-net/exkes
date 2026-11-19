@@ -51,8 +51,8 @@ private val httpClient = HttpClient(Js) {
 // Read API base URL from global variable __EXKES_API_URL__ injected by the server.
 // Falls back to empty string (relative path) if not defined.
 // The js() expression evaluates to a falsy value when __EXKES_API_URL__ is not a string.
-private val isApiUrlDefined: Boolean = js("typeof __EXKES_API_URL__ === 'string'")
-private val rawApiUrl: String = js("__EXKES_API_URL__ || ''")
+private val isApiUrlDefined: Boolean = js("(typeof window !== 'undefined' && typeof window.__EXKES_API_URL__ === 'string') || false")
+private val rawApiUrl: String = js("(typeof window !== 'undefined' && window.__EXKES_API_URL__) || ''")
 
 val apiBaseUrl: String
     get() = if (isApiUrlDefined) rawApiUrl else ""
